@@ -928,73 +928,6 @@ sqlite3_db_config(sqlite3 * db, int op, ...)
 	return rc;
 }
 
-/*
- * Return true if the buffer z[0..n-1] contains all spaces.
- */
-static int
-allSpaces(const char *z, int n)
-{
-	while (n > 0 && z[n - 1] == ' ') {
-		n--;
-	}
-	return n == 0;
-}
-
-/*
- * This is the default collating function named "BINARY" which is always
- * available.
- *
- * If the padFlag argument is not NULL then space padding at the end
- * of strings is ignored.  This implements the RTRIM collation.
- */
-static int
-binCollFunc(void *padFlag,
-	    int nKey1, const void *pKey1, int nKey2, const void *pKey2)
-{
-	int rc, n;
-	n = nKey1 < nKey2 ? nKey1 : nKey2;
-	/* EVIDENCE-OF: R-65033-28449 The built-in BINARY collation compares
-	 * strings byte by byte using the memcmp() function from the standard C
-	 * library.
-	 */
-	rc = memcmp(pKey1, pKey2, n);
-	if (rc == 0) {
-		if (padFlag && allSpaces(((char *)pKey1) + n, nKey1 - n)
-		    && allSpaces(((char *)pKey2) + n, nKey2 - n)
-		    ) {
-			/* EVIDENCE-OF: R-31624-24737 RTRIM is like BINARY except that extra
-			 * spaces at the end of either string do not change the result. In other
-			 * words, strings will compare equal to one another as long as they
-			 * differ only in the number of spaces at the end.
-			 */
-		} else {
-			rc = nKey1 - nKey2;
-		}
-	}
-	return rc;
-}
-
-/*
- * Another built-in collating sequence: NOCASE.
- *
- * This collating sequence is intended to be used for "case independent
- * comparison". SQLite's knowledge of upper and lower case equivalents
- * extends only to the 26 characters used in the English language.
- *
- * At the moment there is only a UTF-8 implementation.
- */
-static int
-nocaseCollatingFunc(void *NotUsed,
-		    int nKey1, const void *pKey1, int nKey2, const void *pKey2)
-{
-	int r = sqlite3StrNICmp((const char *)pKey1, (const char *)pKey2,
-				(nKey1 < nKey2) ? nKey1 : nKey2);
-	UNUSED_PARAMETER(NotUsed);
-	if (0 == r) {
-		r = nKey1 - nKey2;
-	}
-	return r;
-}
 
 /*
  * Return the ROWID of the most recent insert
@@ -2199,7 +2132,7 @@ createCollation(sqlite3 * db,
 	pColl = sqlite3FindCollSeq(db, zName, 1);
 	if (pColl == 0)
 		return SQLITE_NOMEM_BKPT;
-	pColl->xCmp = xCompare;
+	(void)xCompare;//pColl->xCmp = xCompare;
 	pColl->pUser = pCtx;
 	pColl->xDel = xDel;
 	sqlite3Error(db, SQLITE_OK);
@@ -2717,20 +2650,7 @@ openDatabase(const char *zFilename,	/* Database filename UTF-8 encoded */
 	db->szMmap = sqlite3GlobalConfig.szMmap;
 	db->nMaxSorterMmap = 0x7FFFFFFF;
 	sqlite3HashInit(&db->aCollSeq);
-
-	/* Add the default collation sequence BINARY. BINARY works for both UTF-8
-	 * and UTF-16, so add a version for each to avoid any unnecessary
-	 * conversions. The only error that can occur here is a malloc() failure.
-	 *
-	 * EVIDENCE-OF: R-52786-44878 SQLite defines three built-in collating
-	 * functions:
-	 */
-	createCollation(db, sqlite3StrBINARY, 0, binCollFunc, 0);
-	createCollation(db, "NOCASE", 0, nocaseCollatingFunc, 0);
-	createCollation(db, "RTRIM", (void *)1, binCollFunc, 0);
-	if (db->mallocFailed) {
-		goto opendb_out;
-	}
+	
 	/* EVIDENCE-OF: R-08308-17224 The default collating function for all
 	 * strings is BINARY.
 	 */
