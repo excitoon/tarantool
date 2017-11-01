@@ -38,7 +38,7 @@ test:do_test(
         ]]
     end, {
         -- <tkt-4a03ed-1.1>
-        1, "UNIQUE constraint failed: T1.B"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_1' in space 'T1'"
         -- </tkt-4a03ed-1.1>
     })
 

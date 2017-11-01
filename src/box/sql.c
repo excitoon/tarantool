@@ -964,7 +964,7 @@ int tarantoolSqlite3MakeTableFormat(Table *pTable, void *buf)
 	for (i = 0; i < n; i++) {
 		const char *t;
 
-		p = enc->encode_map(p, 2);
+		p = enc->encode_map(p, 3);
 		p = enc->encode_str(p, "name", 4);
 		p = enc->encode_str(p, aCol[i].zName, strlen(aCol[i].zName));
 		p = enc->encode_str(p, "type", 4);
@@ -975,6 +975,8 @@ int tarantoolSqlite3MakeTableFormat(Table *pTable, void *buf)
 				convertSqliteAffinity(aCol[i].affinity, aCol[i].notNull == 0);
 		}
 		p = enc->encode_str(p, t, strlen(t));
+		p = enc->encode_str(p, "is_nullable", 11);
+		p = enc->encode_bool(p, aCol[i].notNull == OE_None);
 	}
 	return (int)(p - base);
 }
@@ -1065,18 +1067,14 @@ int tarantoolSqlite3MakeIdxOpts(SqliteIndex *index, const char *zSql, void *buf)
 	(void)index;
 
 	p = enc->encode_map(base, 2);
-	/* gh-2187
-	 *
-	 * Include all index columns, i.e. "key" columns followed by the
-	 * primary key columns, in secondary indices. It means that all
-	 * indices created via SQL engine are unique.
-	 */
+	/* Mark as unique pk and unique indexes */
 	p = enc->encode_str(p, "unique", 6);
-	/* By now uniqueness is checked by sqlite vdbe engine by extra
-	 * secondary index lookups because we did not implement
-	 * on conflict Replase, Ignore... features
-	 **/
-	p = enc->encode_bool(p, IsPrimaryKeyIndex(index));
+	/* By now uniqueness is checked by Tarantool if user didn't
+	 * specified ON CONFLICT action from the list below:
+	 *   REPLACE, IGNORE, ROLLBACK, FAIL.
+	 * In that situation uniqueness is preserved by VDBE.
+	 */
+	p = enc->encode_bool(p, IsUniqueIndex(index));
 	p = enc->encode_str(p, "sql", 3);
 	p = enc->encode_str(p, zSql, zSql ? strlen(zSql) : 0);
 	return (int)(p - base);

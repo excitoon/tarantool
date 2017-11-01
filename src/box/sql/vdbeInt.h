@@ -390,6 +390,7 @@ struct Vdbe {
 	i64 nDeferredCons;	/* Net deferred constraints this transaction. */
 	i64 nDeferredImmCons;	/* Net deferred immediate constraints */
 
+
 	/* When allocating a new Vdbe object, all of the fields below should be
 	 * initialized to zero or NULL
 	 */

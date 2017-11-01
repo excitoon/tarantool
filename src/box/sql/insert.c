@@ -35,6 +35,7 @@
  */
 #include "sqliteInt.h"
 #include "box/session.h"
+#include <stdbool.h>
 
 /*
  * Generate code that will
@@ -1427,6 +1428,15 @@ sqlite3GenerateConstraintChecks(Parse * pParse,		/* The parser context */
 		int regR;	/* Range of registers holding conflicting PK */
 		int iThisCur;	/* Cursor for this UNIQUE index */
 		int addrUniqueOk;	/* Jump here if the UNIQUE constraint is satisfied */
+		bool onConflictClause = (pIdx->onError == OE_Ignore ||
+					pIdx->onError == OE_Replace) ||
+					(overrideError == OE_Ignore ||
+					overrideError == OE_Replace) ||
+					IsPrimaryKeyIndex(pIdx);
+
+		if (!IsUniqueIndex(pIdx)) {
+			continue;	/* pIdx is not a UNIQUE index */
+		}
 
 		if (aRegIdx[ix] == 0)
 			continue;	/* Skip indices that do not change */
@@ -1555,15 +1565,17 @@ sqlite3GenerateConstraintChecks(Parse * pParse,		/* The parser context */
 			sqlite3VdbeAddOp2(v, OP_IsNull,
 					  reg_pk,
 					  addrUniqueOk);
-		sqlite3VdbeAddOp4Int(v, OP_NoConflict, iThisCur, addrUniqueOk,
-				     regIdx, pIdx->nKeyCol);
+		if (onConflictClause) {
+			sqlite3VdbeAddOp4Int(v, OP_NoConflict, iThisCur, addrUniqueOk,
+				     	     regIdx, pIdx->nKeyCol);
+		}
 		VdbeCoverage(v);
 
 		/* Generate code to handle collisions */
 		regR =
 		    (pIdx == pPk) ? regIdx : sqlite3GetTempRange(pParse,
 								 nPkField);
-		if (isUpdate || onError == OE_Replace) {
+		if ((isUpdate && onConflictClause) || onError == OE_Replace) {
 			if (HasRowid(pTab)) {
 				sqlite3VdbeAddOp2(v, OP_IdxRowid, iThisCur,
 						  regR);
@@ -1600,7 +1612,7 @@ sqlite3GenerateConstraintChecks(Parse * pParse,		/* The parser context */
 							     zName));
 					}
 				}
-				if (isUpdate) {
+				if (isUpdate && onConflictClause) {
 					/* If currently processing the PRIMARY KEY of a WITHOUT ROWID
 					 * table, only conflict if the new PRIMARY KEY values are actually
 					 * different from the old.
@@ -1651,10 +1663,22 @@ sqlite3GenerateConstraintChecks(Parse * pParse,		/* The parser context */
 		       || onError == OE_Fail || onError == OE_Ignore
 		       || onError == OE_Replace);
 		switch (onError) {
-		case OE_Rollback:
-		case OE_Abort:
-		case OE_Fail:{
+		case OE_Rollback:{
 				sqlite3UniqueConstraint(pParse, onError, pIdx);
+				break;
+			}
+		case OE_Fail: {
+				if (!IsPrimaryKeyIndex(pIdx)) {
+					pParse->constraintErrAction = OE_Fail;
+				} else {
+					sqlite3UniqueConstraint(pParse, onError, pIdx);
+				}
+				break;
+			}
+		case OE_Abort: {
+				if (onConflictClause) {
+					sqlite3UniqueConstraint(pParse, onError, pIdx);
+				}
 				break;
 			}
 		case OE_Ignore:{

@@ -2772,6 +2772,7 @@ struct Parse {
 	u8 eOrconf;		/* Default ON CONFLICT policy for trigger steps */
 	u8 disableTriggers;	/* True to disable triggers */
 
+
   /**************************************************************************
   * Fields above must be initialized to zero.  The fields that follow,
   * down to the beginning of the recursive section, do not need to be
@@ -2816,6 +2817,8 @@ struct Parse {
 	TriggerPrg *pTriggerPrg;	/* Linked list of coded triggers */
 	With *pWith;		/* Current WITH clause, or NULL */
 	With *pWithToFree;	/* Free this WITH object at the end of the parse */
+
+	u8 constraintErrAction;	/* Error action due to constraint fail */
 
 	bool initiateTTrans;	/* Initiate Tarantool transaction */
 };

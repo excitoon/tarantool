@@ -5125,6 +5125,8 @@ case OP_IdxInsert: {        /* in2 */
 		assert(pC->deferredMoveto==0);
 		pC->cacheStatus = CACHE_STALE;
 	}
+	assert(p->errorAction == OE_Abort ||
+	       p->errorAction == OE_Fail);
 	if (rc) goto abort_due_to_error;
 	break;
 }

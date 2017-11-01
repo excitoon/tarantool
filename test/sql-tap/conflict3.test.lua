@@ -64,7 +64,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-1.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_2' in space 'T1'"
         -- </conflict-1.3>
     })
 
@@ -119,7 +119,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-2.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_3' in space 'T1'"
         -- </conflict-2.3>
     })
 
@@ -174,7 +174,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-3.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_3' in space 'T1'"
         -- </conflict-3.3>
     })
 
@@ -229,7 +229,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-4.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_2' in space 'T1'"
         -- </conflict-4.3>
     })
 
@@ -284,7 +284,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-5.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_3' in space 'T1'"
         -- </conflict-5.3>
     })
 
@@ -339,7 +339,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-6.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_1' in space 'T1'"
         -- </conflict-6.3>
     })
 
@@ -394,7 +394,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-7.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_2' in space 'T1'"
         -- </conflict-7.3>
     })
 
@@ -449,7 +449,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-8.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_3' in space 'T1'"
         -- </conflict-8.3>
     })
 
@@ -504,7 +504,7 @@ test:do_catchsql_test(
         INSERT INTO t1(a,b,c) VALUES(4,5,6), (5,6,4);
     ]], {
         -- <conflict-9.3>
-        1, "UNIQUE constraint failed: T1.C"
+        1, "Duplicate key exists in unique index 'sqlite_autoindex_T1_3' in space 'T1'"
         -- </conflict-9.3>
     })
 

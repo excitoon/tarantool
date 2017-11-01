@@ -2195,7 +2195,6 @@ sqlite3VdbeRewind(Vdbe * p)
 #endif
 	p->pc = -1;
 	p->rc = SQLITE_OK;
-	p->errorAction = OE_Abort;
 	p->nChange = 0;
 	p->cacheCtr = 1;
 	p->minWriteFileFormat = 255;
@@ -2322,6 +2321,11 @@ sqlite3VdbeMakeReady(Vdbe * p,	/* The VDBE */
 #ifdef SQLITE_ENABLE_STMT_SCANSTATUS
 		memset(p->anExec, 0, p->nOp * sizeof(i64));
 #endif
+	}
+	if (pParse->constraintErrAction == OE_Fail) {
+		p->errorAction = OE_Fail;
+	} else {
+		p->errorAction = OE_Abort;
 	}
 	sqlite3VdbeRewind(p);
 }
