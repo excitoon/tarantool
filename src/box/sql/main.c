@@ -2095,7 +2095,7 @@ createCollation(sqlite3 * db,
 		int (*xCompare) (void *, int, const void *, int, const void *),
 		void (*xDel) (void *))
 {
-	CollSeq *pColl;
+	struct coll *pColl;
 
 	assert(sqlite3_mutex_held(db->mutex));
 
@@ -2104,7 +2104,7 @@ createCollation(sqlite3 * db,
 	 * are no active VMs, invalidate any pre-compiled statements.
 	 */
 	pColl = sqlite3FindCollSeq(db, zName, 0);
-	if (pColl && pColl->xCmp) {
+	if (pColl) {
 		if (db->nVdbeActive) {
 			sqlite3ErrorWithMsg(db, SQLITE_BUSY,
 					    "unable to delete/modify collation sequence due to active statements");
@@ -2119,22 +2119,24 @@ createCollation(sqlite3 * db,
 		 * to be called.
 		 */
 
-		CollSeq *aColl = sqlite3HashFind(&db->aCollSeq, zName);
-		CollSeq *p = &aColl[0];
-		if (p->enc == pColl->enc) {
-			if (p->xDel) {
-				p->xDel(p->pUser);
-			}
-			p->xCmp = 0;
-		}
+//		struct coll *aColl = sqlite3HashFind(&db->aCollSeq, zName);
+//		struct coll *p = &aColl[0];
+//		if (p->enc == pColl->enc) {
+//			if (p->xDel) {
+//				p->xDel(p->pUser);
+//			}
+//			p->xCmp = 0;
+//		}
 	}
 
 	pColl = sqlite3FindCollSeq(db, zName, 1);
 	if (pColl == 0)
 		return SQLITE_NOMEM_BKPT;
 	(void)xCompare;//pColl->xCmp = xCompare;
-	pColl->pUser = pCtx;
-	pColl->xDel = xDel;
+	(void)pCtx;
+	(void)xDel;
+//	pColl->pUser = pCtx;
+//	pColl->xDel = xDel;
 	sqlite3Error(db, SQLITE_OK);
 	return SQLITE_OK;
 }

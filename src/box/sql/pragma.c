@@ -32,6 +32,7 @@
 /*
  * This file contains code used to implement the PRAGMA command.
  */
+#include <box/coll.h>
 #include "sqliteInt.h"
 #include "vdbeInt.h"
 #include "box/session.h"
@@ -627,9 +628,9 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 			pParse->nMem = 2;
 			for (p = sqliteHashFirst(&db->aCollSeq); p;
 			     p = sqliteHashNext(p)) {
-				CollSeq *pColl = (CollSeq *) sqliteHashData(p);
+				struct coll *pColl = (struct coll *) sqliteHashData(p);
 				sqlite3VdbeMultiLoad(v, 1, "is", i++,
-						     pColl->zName);
+						     pColl->name);
 				sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 2);
 			}
 			break;
