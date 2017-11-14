@@ -30,22 +30,15 @@
  */
 #include "sequence.h"
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-
 #include <small/mempool.h>
 #include <msgpuck/msgpuck.h>
 
 #include "diag.h"
 #include "error.h"
-#include "errcode.h"
 #include "fiber.h"
 #include "index.h"
 #include "schema.h"
 #include "session.h"
-#include "trivia/util.h"
 
 #include "third_party/PMurHash.h"
 
@@ -253,9 +246,9 @@ access_check_sequence(struct sequence *seq)
 		/* Access violation, report error. */
 		struct user *user = user_find(cr->uid);
 		if (user != NULL)
-			diag_set(ClientError, ER_SEQUENCE_ACCESS_DENIED,
-				 priv_name(access), user->def->name,
-				 seq->def->name);
+			diag_set(AccessDeniedError, ER_SEQUENCE_ACCESS_DENIED,
+					 schema_object_name(SC_SEQUENCE), seq->def->name,
+					 priv_name(access), user->def->name, seq->def->name);
 		return -1;
 	}
 	return 0;

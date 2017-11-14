@@ -41,7 +41,26 @@ box.schema.user.password('test1')
 box.schema.user.create('test', { password = 'test' })
 ---
 ...
--- su() let's you change the user of the session
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
+function on_denied1() access_denied_count = access_denied_count + 1 end
+---
+...
+function on_denied2(obj_type, name) msg = string.format("%s to %s %s", box.session.user(), obj_type, name) end
+---
+...
+-- on_access_denied sets trigger on access denied
+_ = box.on_access_denied(on_denied1)
+---
+...
+_ = box.on_access_denied(on_denied2)
+---
+...
+-- su() lets you change the user of the session
 -- the user will be unabe to change back unless he/she
 -- is granted access to 'su'
 session.su('test')
@@ -53,6 +72,14 @@ session.su('test')
 box.schema.space.create('test')
 ---
 - error: Write access is denied for user 'test' to space '_schema'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- test to space _schema
 ...
 -- su() goes through because called from admin
 -- console, and it has no access checks
@@ -250,9 +277,23 @@ LISTEN ~= nil
 c = (require 'net.box').connect(LISTEN.host, LISTEN.service)
 ---
 ...
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
 c:call('nosuchfunction')
 ---
 - error: Execute access is denied for user 'guest' to function 'nosuchfunction'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- guest to function nosuchfunction
 ...
 function nosuchfunction() end
 ---
@@ -261,12 +302,28 @@ c:call('nosuchfunction')
 ---
 - error: Execute access is denied for user 'guest' to function 'nosuchfunction'
 ...
+access_denied_count
+---
+- 2
+...
+msg
+---
+- guest to function nosuchfunction
+...
 nosuchfunction = nil
 ---
 ...
 c:call('nosuchfunction')
 ---
 - error: Execute access is denied for user 'guest' to function 'nosuchfunction'
+...
+access_denied_count
+---
+- 3
+...
+msg
+---
+- guest to function nosuchfunction
 ...
 c:close()
 ---
@@ -296,6 +353,22 @@ test_run:cmd('restart server default')
 box.schema.user.drop('testus')
 ---
 ...
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
+function on_denied1() access_denied_count = access_denied_count + 1 end
+---
+...
+function on_denied2(obj_type, name) msg = string.format("%s to %s %s", box.session.user(), obj_type, name) end
+---
+...
+_ = box.on_access_denied(on_denied1)
+---
+...
+--_ = box.on_access_denied(on_denied2)
 -- ------------------------------------------------------------
 -- a test case for gh-289
 -- box.schema.user.drop() with cascade doesn't work
@@ -331,7 +404,7 @@ box.schema.user.drop('uniuser')
 box.schema.user.create('grantor')
 ---
 ...
-box.schema.user.grant('grantor', 'read, write, execute', 'universe')  
+box.schema.user.grant('grantor', 'read, write, execute', 'universe')
 ---
 ...
 session.su('grantor')
@@ -340,17 +413,45 @@ session.su('grantor')
 box.schema.user.create('grantee')
 ---
 ...
-box.schema.user.grant('grantee', 'read, write, execute', 'universe')  
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
+box.schema.user.grant('grantee', 'read, write, execute', 'universe')
 ---
 - error: Grant access on universe is denied for user 'grantor'
 ...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- 
+...
 session.su('grantee')
+---
+...
+access_denied_count = 0
+---
+...
+msg = ""
 ---
 ...
 -- fails - can't suicide - ask the creator to kill you
 box.schema.user.drop('grantee')
 ---
 - error: Read access is denied for user 'grantee' to space '_user'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- 
 ...
 session.su('grantor')
 ---
@@ -359,9 +460,23 @@ box.schema.user.drop('grantee')
 ---
 ...
 -- fails, can't kill oneself
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
 box.schema.user.drop('grantor')
 ---
 - error: Create, drop or alter access on role is denied for user 'grantor'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- 
 ...
 session.su('admin')
 ---
@@ -378,6 +493,12 @@ box.schema.user.drop('grantor')
 session.su('guest')
 ---
 ...
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
 box.space._user:select{0}
 ---
 - error: Read access is denied for user 'guest' to space '_user'
@@ -385,6 +506,14 @@ box.space._user:select{0}
 box.space._user:select{1}
 ---
 - error: Read access is denied for user 'guest' to space '_user'
+...
+access_denied_count
+---
+- 2
+...
+msg
+---
+- 
 ...
 session.su('admin')
 ---
@@ -431,10 +560,24 @@ box.schema.user.passwd()
 session.su('user1')
 ---
 ...
+access_denied_count = 0
+---
+...
+msg = ""
+---
+...
 -- permission denied
 box.schema.user.passwd('admin', 'xxx')
 ---
 - error: Read access is denied for user 'user1' to space '_user'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- 
 ...
 session.su('admin')
 ---
@@ -569,7 +712,7 @@ box.schema.user.drop('twostep_client')
 ---
 ...
 -- the space is dropped when the user is dropped
--- 
+--
 -- box.schema.user.exists()
 box.schema.user.exists('guest')
 ---
@@ -807,9 +950,23 @@ box.internal.collation.create('test', 'ICU', 'ru_RU')
 session.su('test')
 ---
 ...
+msg = ""
+---
+...
+access_denied_count = 0
+---
+...
 box.internal.collation.drop('test') -- fail
 ---
 - error: Create, drop or alter access on collation is denied for user 'test'
+...
+access_denied_count
+---
+- 1
+...
+msg
+---
+- 
 ...
 session.su('admin')
 ---
@@ -819,4 +976,11 @@ box.internal.collation.drop('test') -- success
 ...
 box.schema.user.drop('test')
 ---
+...
+box.on_access_denied(nil, on_denied1)
+---
+...
+box.on_access_denied(nil, on_denied2)
+---
+- error: 'trigger reset: Trigger is not found'
 ...

@@ -16,7 +16,15 @@ box.schema.user.password('test')
 box.schema.user.password('test1')
 -- admin can create any user
 box.schema.user.create('test', { password = 'test' })
--- su() let's you change the user of the session
+access_denied_count = 0
+msg = ""
+function on_denied1() access_denied_count = access_denied_count + 1 end
+function on_denied2(obj_type, name) msg = string.format("%s to %s %s", box.session.user(), obj_type, name) end
+
+-- on_access_denied sets trigger on access denied
+_ = box.on_access_denied(on_denied1)
+_ = box.on_access_denied(on_denied2)
+-- su() lets you change the user of the session
 -- the user will be unabe to change back unless he/she
 -- is granted access to 'su'
 session.su('test')
@@ -24,6 +32,8 @@ session.su('test')
 -- system space _space
 -- in future we may  introduce a separate privilege
 box.schema.space.create('test')
+access_denied_count
+msg
 -- su() goes through because called from admin
 -- console, and it has no access checks
 -- for functions
@@ -109,12 +119,19 @@ box.schema.user.drop('Петя_Иванов')
 LISTEN = require('uri').parse(box.cfg.listen)
 LISTEN ~= nil
 c = (require 'net.box').connect(LISTEN.host, LISTEN.service)
-
+access_denied_count = 0
+msg = ""
 c:call('nosuchfunction')
+access_denied_count
+msg
 function nosuchfunction() end
 c:call('nosuchfunction')
+access_denied_count
+msg
 nosuchfunction = nil
 c:call('nosuchfunction')
+access_denied_count
+msg
 c:close()
 -- Dropping a space recursively drops all grants - it's possible to 
 -- restore from a snapshot
@@ -126,6 +143,12 @@ s:drop()
 box.snapshot()
 test_run:cmd('restart server default')
 box.schema.user.drop('testus')
+access_denied_count = 0
+msg = ""
+function on_denied1() access_denied_count = access_denied_count + 1 end
+function on_denied2(obj_type, name) msg = string.format("%s to %s %s", box.session.user(), obj_type, name) end
+_ = box.on_access_denied(on_denied1)
+--_ = box.on_access_denied(on_denied2)
 -- ------------------------------------------------------------
 -- a test case for gh-289
 -- box.schema.user.drop() with cascade doesn't work
@@ -145,17 +168,29 @@ box.schema.user.drop('uniuser')
 -- only by its creator at the moment
 -- ------------------------------------------------------------
 box.schema.user.create('grantor')
-box.schema.user.grant('grantor', 'read, write, execute', 'universe')  
+box.schema.user.grant('grantor', 'read, write, execute', 'universe')
 session.su('grantor')
 box.schema.user.create('grantee')
-box.schema.user.grant('grantee', 'read, write, execute', 'universe')  
+access_denied_count = 0
+msg = ""
+box.schema.user.grant('grantee', 'read, write, execute', 'universe')
+access_denied_count
+msg
 session.su('grantee')
+access_denied_count = 0
+msg = ""
 -- fails - can't suicide - ask the creator to kill you
 box.schema.user.drop('grantee')
+access_denied_count
+msg
 session.su('grantor')
 box.schema.user.drop('grantee')
 -- fails, can't kill oneself
+access_denied_count = 0
+msg = ""
 box.schema.user.drop('grantor')
+access_denied_count
+msg
 session.su('admin')
 box.schema.user.drop('grantor')
 -- ----------------------------------------------------------
@@ -165,8 +200,12 @@ box.schema.user.drop('grantor')
 -- guest can't read _user table, add a test case
 -- ----------------------------------------------------------
 session.su('guest')
+access_denied_count = 0
+msg = ""
 box.space._user:select{0}
 box.space._user:select{1}
+access_denied_count
+msg
 session.su('admin')
 -- ----------------------------------------------------------
 -- A test case for gh-358 Change user does not work from lua
@@ -183,8 +222,12 @@ box.space._user.index.name:select{'user1'}
 box.schema.user.passwd('invalid_user', 'some_password')
 box.schema.user.passwd()
 session.su('user1')
+access_denied_count = 0
+msg = ""
 -- permission denied
 box.schema.user.passwd('admin', 'xxx')
+access_denied_count
+msg
 session.su('admin')
 box.schema.user.drop('user1')
 box.space._user.index.name:select{'user1'}
@@ -231,7 +274,7 @@ box.schema.user.grant('twostep_client', 'execute', 'function', 'test')
 box.schema.user.drop('twostep')
 box.schema.user.drop('twostep_client')
 -- the space is dropped when the user is dropped
--- 
+--
 -- box.schema.user.exists()
 box.schema.user.exists('guest')
 box.schema.user.exists(nil)
@@ -313,7 +356,13 @@ session.su('admin')
 box.internal.collation.drop('test') -- success
 box.internal.collation.create('test', 'ICU', 'ru_RU')
 session.su('test')
+msg = ""
+access_denied_count = 0
 box.internal.collation.drop('test') -- fail
+access_denied_count
+msg
 session.su('admin')
 box.internal.collation.drop('test') -- success
 box.schema.user.drop('test')
+box.on_access_denied(nil, on_denied1)
+box.on_access_denied(nil, on_denied2)

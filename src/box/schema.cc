@@ -65,7 +65,6 @@ uint32_t dd_version_id = version_id(1, 6, 4);
 
 struct rlist on_alter_space = RLIST_HEAD_INITIALIZER(on_alter_space);
 struct rlist on_alter_sequence = RLIST_HEAD_INITIALIZER(on_alter_sequence);
-
 /**
  * Lock of scheme modification
  */

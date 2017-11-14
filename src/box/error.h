@@ -39,6 +39,10 @@ extern "C" {
 struct error *
 BuildClientError(const char *file, unsigned line, uint32_t errcode, ...);
 
+struct error *
+BuildAccessDeniedError(const char *file, unsigned line, uint32_t errcode,
+					   const char* type, const char *name, ...);
+
 /** \cond public */
 
 struct error;
@@ -125,6 +129,8 @@ box_error_set(const char *file, unsigned line, uint32_t code,
 
 extern const struct type_info type_ClientError;
 extern const struct type_info type_XlogError;
+extern const struct type_info type_AccessDeniedError;
+extern struct rlist on_access_denied;
 
 #if defined(__cplusplus)
 } /* extern "C" */
@@ -170,6 +176,12 @@ public:
 		/* TODO: actually calls ClientError::log */
 		log();
 	}
+};
+
+class AccessDeniedError: public ClientError {
+public:
+	AccessDeniedError( const char *file, unsigned line, uint32_t errcode,
+					   const char *type, const char *name,...);
 };
 
 /**

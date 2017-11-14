@@ -33,6 +33,8 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
+#include <box/schema.h>
+#include <lua/trigger.h>
 
 #include "lua/utils.h" /* luaT_error() */
 
@@ -199,10 +201,27 @@ lbox_backup_stop(struct lua_State *L)
 	return 0;
 }
 
+static int
+lbox_push_on_access_denied(struct lua_State *L, void *event)
+{
+	struct access_denied_params *res = (struct access_denied_params *)event;
+	lua_pushstring(L, res->type);
+	lua_pushstring(L, res->name);
+	return 2;
+}
+
+static int
+lbox_on_access_denied(lua_State *L)
+{
+	return lbox_trigger_reset(L, 2, &on_access_denied,
+							  lbox_push_on_access_denied);
+}
+
 static const struct luaL_Reg boxlib[] = {
 	{"commit", lbox_commit},
 	{"rollback", lbox_rollback},
 	{"snapshot", lbox_snapshot},
+	{"on_access_denied", lbox_on_access_denied},
 	{NULL, NULL}
 };
 
