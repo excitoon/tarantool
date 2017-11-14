@@ -61,11 +61,15 @@ enum say_level {
 enum say_format {
 	SF_PLAIN,
 	SF_JSON,
+	SF_CUSTOM,
 	say_format_MAX
 };
 
+struct say_config;
 extern int log_level;
-extern int log_format;
+typedef int(*format_func_t)(char *buf, int len, int level,
+							 const char *filename, int line, const char *error,
+							 const char *format, va_list ap);
 
 static inline bool
 say_log_level_is_enabled(int level)
@@ -73,6 +77,15 @@ say_log_level_is_enabled(int level)
        return level <= log_level;
 }
 
+void
+say_cfg_write_log(struct say_config *cfg, int level, const char *filename,
+				  int line, const char *error, const char *format, ...);
+
+struct say_config *
+say_new(const char *init_str, int nonblock,
+	const char *format, format_func_t format_func);
+
+void say_delete(struct say_config *conf);
 /** \endcond public */
 
 /**
@@ -115,6 +128,8 @@ vsay(int level, const char *filename, int line, const char *error,
 /** \cond public */
 typedef void (*sayfunc_t)(int, const char *, int, const char *,
 		    const char *, ...);
+typedef void (*writefunc_t)(struct say_config*, int, const char *, int, const char *,
+						  const char *, va_list ap);
 
 /** Internal function used to implement say() macros */
 CFORMAT(printf, 5, 0) extern sayfunc_t _say;

@@ -44,17 +44,23 @@
 #include <arpa/inet.h>
 
 pid_t log_pid = 0;
+
+struct say_config {
+	int log_format;
+	int log_fd;
+	enum say_logger_type logger_type;
+	char *log_path;
+	int logger_nonblock;
+	writefunc_t write_func;
+	format_func_t format_func;
+};
+
 int log_level = S_INFO;
-int log_format = SF_PLAIN;
+bool logger_background = true;
 
 static const char logger_syntax_reminder[] =
 	"expecting a file name or a prefix, such as '|', 'pipe:', 'syslog:'";
 
-static bool logger_background = true;
-static int logger_nonblock;
-
-static int log_fd = STDERR_FILENO;
-static char *log_path; /* iff logger_type == SAY_LOGGER_FILE */
 /* Application identifier used to group syslog messages. */
 static char *syslog_ident = NULL;
 
@@ -68,7 +74,24 @@ static void
 say_logger_syslog(int level, const char *filename, int line, const char *error,
 		  const char *format, ...);
 
-static enum say_logger_type logger_type = SAY_LOGGER_BOOT;
+static int
+say_format_boot(char *buf, int len, const char *error,
+				const char *format, va_list ap);
+
+struct say_config config = {
+		SF_PLAIN, /* log_format */
+		STDERR_FILENO, /*config.log_fd*/
+		SAY_LOGGER_BOOT, /* logger_type */
+		NULL, /* config.log_path iff logger_type == SAY_LOGGER_FILE */
+		0, /* logger_nonblock */
+		NULL, /* log_func; in boot mode cfg is not used*/
+		NULL /* format_func; in boot mode cfg is not used*/
+};
+
+#define MAX_NUMBER_SAY_CONFIG 16
+const struct say_config *cfgs[MAX_NUMBER_SAY_CONFIG] = {
+		[0] = &config
+};
 sayfunc_t _say = say_logger_boot;
 
 static const char level_chars[] = {
@@ -142,12 +165,13 @@ void
 say_set_log_format(enum say_format format)
 {
 	assert(format >= SF_PLAIN && format <= SF_JSON);
-	log_format = format;
+	config.log_format = format;
 }
 
 static const char *say_format_strs[] = {
 	[SF_PLAIN] = "plain",
 	[SF_JSON] = "json",
+	[SF_CUSTOM] = "custom",
 	[say_format_MAX] = "unknown"
 };
 
@@ -157,12 +181,18 @@ say_format_by_name(const char *format)
 	return STR2ENUM(say_format, format);
 }
 
+static void
+write_to_file(struct say_config *cfg, int level, const char *filename, int line,
+			  const char *error,  const char *format, va_list ap);
+static void
+write_to_syslog(struct say_config *cfg, int level, const char *filename, int line,
+			  const char *error,  const char *format, va_list ap);
 /**
  * Initialize the logger pipe: a standalone
  * process which is fed all log messages.
  */
 static void
-say_pipe_init(const char *init_str)
+say_pipe_init(struct say_config *cfg, const char *init_str)
 {
 	int pipefd[2];
 	char cmd[] = { "/bin/sh" };
@@ -224,10 +254,13 @@ say_pipe_init(const char *init_str)
 	/* OK, let's hope for the best. */
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 	close(pipefd[0]);
-	log_fd = pipefd[1];
+	cfg->log_fd = pipefd[1];
 	say_info("started logging into a pipe, SIGHUP log rotation disabled");
-	logger_type = SAY_LOGGER_PIPE;
-	_say = say_logger_file;
+	cfg->logger_type = SAY_LOGGER_PIPE;
+	if (cfg == &config) {
+		_say = say_logger_file;
+	}
+	cfg->write_func = write_to_file;
 	return;
 error:
 	say_syserror("can't start logger: %s", init_str);
@@ -237,37 +270,49 @@ error:
 /**
  * Rotate logs on SIGHUP
  */
+static int
+rotate(const struct say_config *cfg)
+{
+	if (cfg->logger_type != SAY_LOGGER_FILE) {
+		return 0;
+	}
+	int fd = open(cfg->log_path, O_WRONLY | O_APPEND | O_CREAT,
+				  S_IRUSR | S_IWUSR | S_IRGRP);
+	if (fd < 0)
+		return -1;
+	/* The whole charade's purpose is to avoid cfg->log_fd changing.
+	 * Remember, we are a signal handler.*/
+	dup2(fd, cfg->log_fd);
+	close(fd);
+	/* logger_background matters only main logger
+	 * */
+	if (cfg == &config && logger_background) {
+		dup2(cfg->log_fd, STDOUT_FILENO);
+		dup2(cfg->log_fd, STDERR_FILENO);
+	}
+
+	if (cfg->logger_nonblock) {
+		int flags;
+		if ( (flags = fcntl(cfg->log_fd, F_GETFL, 0)) < 0 ||
+			 fcntl(cfg->log_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+			say_syserror("fcntl, fd=%i", cfg->log_fd);
+	}
+	char logrotate_message[] = "log file has been reopened\n";
+	(void )write(cfg->log_fd,
+				  logrotate_message, (sizeof logrotate_message) - 1);
+	return 0;
+}
+
 void
 say_logrotate(int signo)
 {
 	(void) signo;
-	if (logger_type != SAY_LOGGER_FILE)
-		return;
 	int saved_errno = errno;
-	int fd = open(log_path, O_WRONLY | O_APPEND | O_CREAT,
-	              S_IRUSR | S_IWUSR | S_IRGRP);
-	if (fd < 0)
-		goto done;
-	/* The whole charade's purpose is to avoid log_fd changing.
-	 * Remember, we are a signal handler.*/
-	dup2(fd, log_fd);
-	close(fd);
-
-	if (logger_background) {
-		dup2(log_fd, STDOUT_FILENO);
-		dup2(log_fd, STDERR_FILENO);
+	for (int i = 0; i < MAX_NUMBER_SAY_CONFIG && cfgs[i] != NULL; i++) {
+		if (rotate(cfgs[i]) < 0) {
+			break;
+		}
 	}
-	if (logger_nonblock) {
-		int flags;
-		if ( (flags = fcntl(log_fd, F_GETFL, 0)) < 0 ||
-		    fcntl(log_fd, F_SETFL, flags | O_NONBLOCK) < 0)
-			say_syserror("fcntl, fd=%i", log_fd);
-	}
-	char logrotate_message[] = "log file has been reopened\n";
-	int r = write(log_fd,
-	              logrotate_message, (sizeof logrotate_message) - 1);
-	(void)r;
-done:
 	errno = saved_errno;
 }
 
@@ -276,22 +321,26 @@ done:
  * rotation signal.
  */
 static void
-say_file_init(const char *init_str)
+say_file_init(struct say_config *cfg, const char *init_str)
 {
 	int fd;
-	log_path = abspath(init_str);
-	if (log_path == NULL)
+	cfg->log_path = abspath(init_str);
+	if (cfg->log_path == NULL)
 		panic("out of memory");
-	fd = open(log_path, O_WRONLY | O_APPEND | O_CREAT,
+	fd = open(cfg->log_path, O_WRONLY | O_APPEND | O_CREAT,
 	          S_IRUSR | S_IWUSR | S_IRGRP);
 	if (fd < 0) {
-		say_syserror("can't open log file: %s", log_path);
+		say_syserror("can't open log file: %s", cfg->log_path);
 		exit(EXIT_FAILURE);
 	}
-	log_fd = fd;
-	signal(SIGHUP, say_logrotate); /* will access log_fd */
-	logger_type = SAY_LOGGER_FILE;
-	_say = say_logger_file;
+	cfg->log_fd = fd;
+	signal(SIGHUP, say_logrotate); /* will access cfg->log_fd */
+	cfg->logger_type = SAY_LOGGER_FILE;
+	if (cfg == &config) {
+		_say = say_logger_file;
+	} else {
+		cfg->write_func = write_to_file;
+	}
 }
 
 /**
@@ -318,21 +367,21 @@ syslog_connect_unix(const char *path)
 }
 
 static inline int
-say_syslog_connect()
+say_syslog_connect(struct say_config *cfg)
 {
 	/*
 	 * Try two locations: '/dev/log' for Linux and
 	 * '/var/run/syslog' for Mac.
 	 */
-	log_fd = syslog_connect_unix("/dev/log");
-	if (log_fd < 0)
+	cfg->log_fd = syslog_connect_unix("/dev/log");
+	if (cfg->log_fd < 0)
 		return syslog_connect_unix("/var/run/syslog");
-	return log_fd;
+	return cfg->log_fd;
 }
 
 /** Initialize logging to syslog */
 static void
-say_syslog_init(const char *init_str)
+say_syslog_init(struct say_config *cfg, const char *init_str)
 {
 	char *error;
 	struct say_syslog_opts opts;
@@ -349,53 +398,56 @@ say_syslog_init(const char *init_str)
 	else
 		syslog_ident = strdup(opts.identity);
 	say_free_syslog_opts(&opts);
-	log_fd = say_syslog_connect();
-	if (log_fd < 0) {
+	cfg->log_fd = say_syslog_connect(cfg);
+	if (cfg->log_fd < 0) {
 		/* syslog indent is freed in atexit(). */
 		say_syserror("syslog logger: %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	say_info("started logging to syslog, SIGHUP log rotation disabled");
-	logger_type = SAY_LOGGER_SYSLOG;
-	_say = say_logger_syslog;
-	return;
+	cfg->logger_type = SAY_LOGGER_SYSLOG;
+	if (cfg == &config) {
+		_say = say_logger_syslog;
+	} else {
+		cfg->write_func = write_to_syslog;
+	}
 }
 
 /**
  * Initialize logging subsystem to use in daemon mode.
  */
 void
-say_logger_init(const char *init_str, int level, int nonblock, const char *format, int background)
+say_cfg_init(struct say_config *cfg, const char *init_str, int nonblock,
+			 const char *format)
 {
-	log_level = level;
-	say_set_log_format(say_format_by_name(format));
-	logger_nonblock = nonblock;
-	logger_background = background;
+	cfg->log_format = say_format_by_name(format);
+	assert(cfg->log_format >= SF_PLAIN && cfg->log_format <= SF_CUSTOM);
+	cfg->logger_nonblock = nonblock;
 	setvbuf(stderr, NULL, _IONBF, 0);
 
 	if (init_str != NULL) {
 		enum say_logger_type type;
 		if (say_parse_logger_type(&init_str, &type)) {
 			say_syserror("logger: bad initialization string: %s, %s",
-				     init_str, logger_syntax_reminder);
+						 init_str, logger_syntax_reminder);
 			exit(EXIT_FAILURE);
 		}
 		switch (type) {
-		case SAY_LOGGER_PIPE:
-			say_pipe_init(init_str);
-			break;
-		case SAY_LOGGER_SYSLOG:
-			if (log_format != SF_PLAIN) {
-				fprintf(stderr, "logger: syslog does not "
-						"support non-plain formats\n");
-				exit(EXIT_FAILURE);
-			}
-			say_syslog_init(init_str);
-			break;
-		case SAY_LOGGER_FILE:
-		default:
-			say_file_init(init_str);
-			break;
+			case SAY_LOGGER_PIPE:
+				say_pipe_init(cfg, init_str);
+				break;
+			case SAY_LOGGER_SYSLOG:
+				if (cfg->log_format != SF_PLAIN) {
+					fprintf(stderr, "logger: syslog does not "
+							"support non-plain formats\n");
+					exit(EXIT_FAILURE);
+				}
+				say_syslog_init(cfg, init_str);
+				break;
+			case SAY_LOGGER_FILE:
+			default:
+				say_file_init(cfg, init_str);
+				break;
 		}
 		/*
 		 * Set non-blocking mode if a non-default log
@@ -403,21 +455,31 @@ say_logger_init(const char *init_str, int level, int nonblock, const char *forma
 		 * non-blocking: this will garble interactive
 		 * console output.
 		 */
-		if (logger_nonblock) {
+		if (cfg->logger_nonblock) {
 			int flags;
-			if ( (flags = fcntl(log_fd, F_GETFL, 0)) < 0 ||
-				fcntl(log_fd, F_SETFL, flags | O_NONBLOCK) < 0)
-				say_syserror("fcntl, fd=%i", log_fd);
+			if ( (flags = fcntl(cfg->log_fd, F_GETFL, 0)) < 0 ||
+				 fcntl(cfg->log_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+				say_syserror("fcntl, fd=%i", cfg->log_fd);
 		}
 	} else {
-		logger_type = SAY_LOGGER_STDERR;
+		cfg->logger_type = SAY_LOGGER_STDERR;
 		_say = say_logger_file;
 	}
 
+
+}
+
+void
+say_logger_init(const char *init_str, int level, int nonblock,
+				const char *format, int background)
+{
+	log_level = level;
+	logger_background = background;
+	say_cfg_init(&config, init_str, nonblock, format);
 	if (background) {
 		fflush(stderr);
 		fflush(stdout);
-		if (log_fd == STDERR_FILENO) {
+		if (config.log_fd == STDERR_FILENO) {
 			int fd = open("/dev/null", O_WRONLY);
 			if (fd < 0)
 				exit(EXIT_FAILURE);
@@ -425,17 +487,23 @@ say_logger_init(const char *init_str, int level, int nonblock, const char *forma
 			dup2(fd, STDOUT_FILENO);
 			close(fd);
 		} else {
-			dup2(log_fd, STDERR_FILENO);
-			dup2(log_fd, STDOUT_FILENO);
+			dup2(config.log_fd, STDERR_FILENO);
+			dup2(config.log_fd, STDOUT_FILENO);
 		}
 	}
 }
 
 void
+say_cfg_free(struct say_config *cfg)
+{
+	if (cfg->logger_type == SAY_LOGGER_SYSLOG && cfg->log_fd != -1)
+		close(cfg->log_fd);
+}
+
+void
 say_logger_free()
 {
-	if (logger_type == SAY_LOGGER_SYSLOG && log_fd != -1)
-		close(log_fd);
+	say_cfg_free(&config);
 	free(syslog_ident);
 }
 
@@ -528,8 +596,9 @@ say_format_plain(char *buf, int len, int level, const char *filename, int line,
 
 /**
  * Format log message in json format:
- * {"time": 1507026445.23232, "level": "WARN", "message": <message>, "pid": <pid>,
- * "cord_name": <name>, "fiber_id": <id>, "fiber_name": <fiber_name>, filename": <filename>, "line": <fds>}
+ * {"time": 1507026445.23232, "level": "WARN", "message": <message>,
+ * "pid": <pid>, "cord_name": <name>, "fiber_id": <id>,
+ * "fiber_name": <fiber_name>, filename": <filename>, "line": <fds>}
  */
 static int
 say_format_json(char *buf, int len, int level, const char *filename, int line,
@@ -601,12 +670,13 @@ say_format_json(char *buf, int len, int level, const char *filename, int line,
 			SNPRINT(total, snprintf, buf, len, "\", ");
 		}
 	}
-
-	SNPRINT(total, snprintf, buf, len, "\"file\": \"");
-	SNPRINT(total, json_escape, buf, len, filename);
-	SNPRINT(total, snprintf, buf, len, "\", ");
-	SNPRINT(total, snprintf, buf, len, "\"line\": %i}", line);
-	SNPRINT(total, snprintf, buf, len, "\n");
+	if (filename) {
+		SNPRINT(total, snprintf, buf, len, "\"file\": \"");
+		SNPRINT(total, json_escape, buf, len, filename);
+		SNPRINT(total, snprintf, buf, len, "\", ");
+		SNPRINT(total, snprintf, buf, len, "\"line\": %i}", line);
+		SNPRINT(total, snprintf, buf, len, "\n");
+	}
 	return total;
 }
 
@@ -674,7 +744,7 @@ static void
 say_logger_boot(int level, const char *filename, int line, const char *error,
 		const char *format, ...)
 {
-	assert(logger_type == SAY_LOGGER_BOOT);
+	assert(config.logger_type == SAY_LOGGER_BOOT);
 	(void) filename;
 	(void) line;
 	if (!say_log_level_is_enabled(level))
@@ -694,39 +764,49 @@ say_logger_boot(int level, const char *filename, int line, const char *error,
  * File and pipe logger
  */
 static void
-say_logger_file(int level, const char *filename, int line, const char *error,
-		const char *format, ...)
+write_to_file(struct say_config *cfg, int level, const char *filename, int line,
+			  const char *error,  const char *format, va_list ap)
 {
-	assert(logger_type == SAY_LOGGER_FILE ||
-	       logger_type == SAY_LOGGER_PIPE ||
-	       logger_type == SAY_LOGGER_STDERR);
-	if (!say_log_level_is_enabled(level))
-		return;
-
-	int errsv = errno; /* Preserve the errno. */
-	va_list ap;
-	va_start(ap, format);
+	assert(cfg->logger_type == SAY_LOGGER_FILE ||
+		   cfg->logger_type == SAY_LOGGER_PIPE ||
+		   cfg->logger_type == SAY_LOGGER_STDERR);
 	int total = 0;
-	switch (log_format) {
+	switch (cfg->log_format) {
 		case SF_PLAIN:
 			total = say_format_plain(buf, sizeof(buf), level,
-						 filename, line, error,
-						 format, ap);
+									 filename, line, error,
+									 format, ap);
 			break;
 		case SF_JSON:
 			total = say_format_json(buf, sizeof(buf), level,
-						filename, line, error,
-						format, ap);
+									filename, line, error,
+									format, ap);
+			break;
+		case SF_CUSTOM:
+			total = cfg->format_func(buf, sizeof(buf), level,
+					filename, line, error,
+					format, ap);
 			break;
 		default:
 			unreachable();
 	}
 	assert(total >= 0);
-	(void) write(log_fd, buf, total);
+	(void) write(cfg->log_fd, buf, total);
 	/* Log fatal errors to STDERR */
-	if (level == S_FATAL && log_fd != STDERR_FILENO)
+	if (cfg == &config && level == S_FATAL && cfg->log_fd != STDERR_FILENO)
 		(void) write(STDERR_FILENO, buf, total);
+}
 
+static void
+say_logger_file(int level, const char *filename, int line, const char *error,
+		const char *format, ...)
+{
+	if (!say_log_level_is_enabled(level))
+		return;
+	va_list ap;
+	va_start(ap, format);
+	int errsv = errno; /* Preserve the errno. */
+	write_to_file(&config, level, filename, line, error, format, ap);
 	va_end(ap);
 	errno = errsv; /* Preserve the errno. */
 }
@@ -735,46 +815,52 @@ say_logger_file(int level, const char *filename, int line, const char *error,
  * Syslog logger
  */
 static void
-say_logger_syslog(int level, const char *filename, int line, const char *error,
-		  const char *format, ...)
+write_to_syslog(struct say_config *cfg, int level, const char *filename,
+				int line,
+				const char *error, const char *format, va_list ap)
 {
-	assert(logger_type == SAY_LOGGER_SYSLOG);
-
-	if (!say_log_level_is_enabled(level))
-		return;
-
-	int errsv = errno; /* Preserve the errno. */
-	va_list ap;
-	va_start(ap, format);
-
+	assert(cfg->logger_type == SAY_LOGGER_SYSLOG);
+	assert(cfg->log_format = SF_PLAIN);
 	int total = say_format_syslog(buf, sizeof(buf), level, filename, line,
-				       error, format, ap);
+								  error, format, ap);
 	assert(total >= 0);
 
-	if (level == S_FATAL && log_fd != STDERR_FILENO)
+	if (cfg == &config && level == S_FATAL && cfg->log_fd != STDERR_FILENO)
 		(void) write(STDERR_FILENO, buf, total);
 
-	if (log_fd < 0 || write(log_fd, buf, total) <= 0) {
+	if (cfg->log_fd < 0 || write(cfg->log_fd, buf, total) <= 0) {
 		/*
 		 * Try to reconnect, if write to syslog has
 		 * failed. Syslog write can fail, if, for example,
 		 * syslogd is restarted. In such a case write to
 		 * UNIX socket starts return -1 even for UDP.
 		 */
-		if (log_fd >= 0)
-			close(log_fd);
-		log_fd = say_syslog_connect();
-		if (log_fd >= 0) {
+		if (cfg->log_fd >= 0)
+			close(cfg->log_fd);
+		cfg->log_fd = say_syslog_connect(cfg);
+		if (cfg->log_fd >= 0) {
 			/*
 			 * In a case or error the log message is
 			 * lost. We can not wait for connection -
 			 * it would block thread. Try to reconnect
 			 * on next vsay().
 			 */
-			(void) write(log_fd, buf, total);
+			(void) write(cfg->log_fd, buf, total);
 		}
 	}
+}
 
+static void
+say_logger_syslog(int level, const char *filename, int line, const char *error,
+		  const char *format, ...)
+{
+
+	if (!say_log_level_is_enabled(level))
+		return;
+	int errsv = errno; /* Preserve the errno. */
+	va_list ap;
+	va_start(ap, format);
+	write_to_syslog(&config, level, filename, line, error, format, ap);
 	va_end(ap);
 	errno = errsv; /* Preserve the errno. */
 }
@@ -889,4 +975,49 @@ say_free_syslog_opts(struct say_syslog_opts *opts)
 {
 	free(opts->copy);
 	opts->copy = NULL;
+}
+struct say_config *
+say_new(const char *init_str, int nonblock,
+			 const char *format, format_func_t format_func)
+{
+	struct say_config *cfg = (struct say_config *) calloc(1, sizeof(*cfg));
+	if (cfg == NULL) {
+		fprintf(stderr, "logger: out of memory creating new logger\n");
+		return NULL;
+	}
+	say_cfg_init(cfg, init_str, nonblock, format);
+	cfg->format_func = format_func;
+	int count = 0;
+	for (;cfgs[count] != NULL && count < MAX_NUMBER_SAY_CONFIG; count++){}
+	if (count >= MAX_NUMBER_SAY_CONFIG) {
+		fprintf(stderr, "logger: buffer of loggers is full\n");
+		free(cfg);
+		return NULL;
+	}
+	cfgs[count] = cfg;
+	return cfg;
+}
+
+void
+say_delete(struct say_config *cfg)
+{
+	assert(cfg != NULL);
+	for (int i = 0; cfgs[i] != NULL && i < MAX_NUMBER_SAY_CONFIG; i++) {
+		if (cfgs[i] == cfg) {
+			say_cfg_free(cfg);
+			cfgs[i] = NULL;
+			break;
+		}
+	}
+	free(cfg);
+}
+
+void
+say_cfg_write_log(struct say_config *cfg, int level, const char *filename, int line,
+				  const char *error, const char *format, ...)
+{
+	va_list ap;
+	va_start(ap, format);
+	cfg->write_func(cfg, level, filename, line, error, format, ap);
+	va_end(ap);
 }
