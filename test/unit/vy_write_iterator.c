@@ -14,11 +14,16 @@
  * @param content_count Size of the @content.
  * @param expected Expected results of the iteration.
  * @param expected_count Size of the @expected.
+ * @param skipped Expected skipped REPLACEs written sequentialy
+ *        key by key.
+ * @param skipped_count Size of @a skipped.
  * @param vlsns Read view lsns for the write iterator.
  * @param vlsns_count Size of the @vlsns.
  * @param is_primary True, if the new mem belongs to the primary
  *        index.
  * @param is_last_level True, if the new mem is the last level.
+ * @param track_skipped_statements True, if skipped REPLACEs must
+ *        be saved.
  */
 void
 compare_write_iterator_results(struct key_def *key_def,
@@ -26,8 +31,11 @@ compare_write_iterator_results(struct key_def *key_def,
 			       int content_count,
 			       const struct vy_stmt_template *expected,
 			       int expected_count,
+			       const struct vy_stmt_template *skipped,
+			       int skipped_count,
 			       const int *vlsns, int vlsns_count,
-			       bool is_primary, bool is_last_level)
+			       bool is_primary, bool is_last_level,
+			       bool track_skipped_statements)
 {
 	/* Create lsregion */
 	struct lsregion lsregion;
@@ -43,10 +51,12 @@ compare_write_iterator_results(struct key_def *key_def,
 
 	struct vy_stmt_stream *wi =
 		vy_write_iterator_new(key_def, mem->format, mem->upsert_format,
-				      is_primary, is_last_level, &rv_list);
+				      is_primary, is_last_level, &rv_list,
+				      track_skipped_statements);
 	fail_if(wi == NULL);
 	fail_if(vy_write_iterator_new_mem(wi, mem) != 0);
 
+	int skipped_at_all = 0;
 	struct tuple *ret;
 	fail_if(wi->iface->start(wi) != 0);
 	int i = 0;
@@ -60,8 +70,25 @@ compare_write_iterator_results(struct key_def *key_def,
 				    mem->format_with_colmask),
 		   "stmt %d is correct", i);
 		++i;
+		int count;
+		struct tuple **real_skipped =
+			vy_write_iterator_skipped_stmts(wi, &count);
+		if (count == 0 || !track_skipped_statements)
+			continue;
+		fail_if(skipped_at_all + count > skipped_count);
+		for (int j = 0; j < count; ++j) {
+			ok(vy_stmt_are_same(real_skipped[j],
+					    &skipped[j + skipped_at_all],
+					    mem->format, mem->upsert_format,
+					    mem->format_with_colmask),
+			   "skipped %d statement is correct",
+			   j + skipped_at_all);
+		}
+		skipped_at_all += count;
 	} while (ret != NULL);
 	ok(i == expected_count, "correct results count");
+	if (track_skipped_statements)
+		ok(skipped_at_all == skipped_count, "corremct skipped count");
 
 	/* Clean up */
 	wi->iface->close(wi);
@@ -75,7 +102,7 @@ void
 test_basic(void)
 {
 	header();
-	plan(38);
+	plan(62);
 
 	/* Create key_def */
 	uint32_t fields[] = { 0 };
@@ -84,7 +111,7 @@ test_basic(void)
 	assert(key_def != NULL);
 
 /*
- * STATEMENT: REPL REPL REPL  DEL  REPL  REPL  REPL  REPL  REPL  REPL
+ * STATEMENT: REPL REPL REPL REPL  REPL  REPL  REPL  REPL  REPL  REPL
  * LSN:        5     6   7     8    9     10    11    12    13    14
  * READ VIEW:            *          *                 *
  *            \____________/\________/\_________________/\___________/
@@ -106,13 +133,19 @@ test_basic(void)
 	const struct vy_stmt_template expected[] = {
 		content[9], content[7], content[4], content[2]
 	};
+	const struct vy_stmt_template skipped[] = {
+		content[8], content[6], content[5], content[3],
+		content[1], content[0],
+	};
 	const int vlsns[] = {7, 9, 12};
 	int content_count = sizeof(content) / sizeof(content[0]);
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
+	int skipped_count = sizeof(skipped) / sizeof(skipped[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
 				       expected, expected_count,
-				       vlsns, vlsns_count, true, true);
+				       skipped, skipped_count,
+				       vlsns, vlsns_count, true, true, true);
 }
 {
 /*
@@ -145,8 +178,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, false);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, false, false);
 }
 {
 /*
@@ -173,8 +206,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, true);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, true, false);
 }
 {
 /*
@@ -193,8 +226,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, true);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, true, true);
 }
 {
 /*
@@ -217,8 +250,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, true);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, true, false);
 }
 {
 /*
@@ -240,8 +273,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, false);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, false, false);
 }
 {
 /*
@@ -268,8 +301,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, false, true);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, false, true, false);
 }
 {
 /*
@@ -288,8 +321,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, false, false);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, false, false, false);
 }
 {
 /*
@@ -315,8 +348,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, true, false);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, false, false);
 }
 {
 /*
@@ -338,13 +371,18 @@ test_basic(void)
 	const struct vy_stmt_template expected[] = {
 		content[3], content[2], content[1]
 	};
+	const struct vy_stmt_template skipped[] = {
+		content[0]
+	};
 	const int vlsns[] = {7, 10, 20, 21, 22, 23};
 	int content_count = sizeof(content) / sizeof(content[0]);
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
+	int skipped_count = sizeof(skipped) / sizeof(skipped[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
 				       expected, expected_count,
-				       vlsns, vlsns_count, true, true);
+				       skipped, skipped_count,
+				       vlsns, vlsns_count, true, true, true);
 }
 {
 /*
@@ -368,8 +406,8 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
-				       expected, expected_count,
-				       vlsns, vlsns_count, false, false);
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, false, false, false);
 }
 {
 /*
@@ -393,8 +431,47 @@ test_basic(void)
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
+				       expected, expected_count, NULL, 0,
+				       vlsns, vlsns_count, true, false, false);
+}
+{
+/*
+ * LINKED WITH: gh-2129 about getting skipped REPLACEs to use them
+ * as surrogate DELETEs for secondary indexes.
+ *
+ * STATEMENT: REPL  DEL REPL  REPL REPL  DEL  REPL  REPL  REPL   DEL
+ * LSN:        5     6   7     8    9    10    11    12    13    14
+ * READ VIEW:            *          *                 *
+ *            \____________/\________/\_________________/\___________/
+ *                 merge       merge          merge           merge
+ */
+	const struct vy_stmt_template content[] = {
+		STMT_TEMPLATE(5, REPLACE, 1, 1),
+		STMT_TEMPLATE(6, DELETE, 1),
+		STMT_TEMPLATE(7, REPLACE, 1, 2),
+		STMT_TEMPLATE(8, REPLACE, 1, 3),
+		STMT_TEMPLATE(9, REPLACE, 1, 4),
+		STMT_TEMPLATE(10, DELETE, 1),
+		STMT_TEMPLATE(11, REPLACE, 1, 5),
+		STMT_TEMPLATE(12, REPLACE, 1, 6),
+		STMT_TEMPLATE(13, REPLACE, 1, 7),
+		STMT_TEMPLATE(14, DELETE, 1),
+	};
+	const struct vy_stmt_template expected[] = {
+		content[9], content[7], content[4], content[2]
+	};
+	const struct vy_stmt_template skipped[] = {
+		content[8], content[6], content[3], content[0]
+	};
+	const int vlsns[] = {7, 9, 12};
+	int content_count = sizeof(content) / sizeof(content[0]);
+	int expected_count = sizeof(expected) / sizeof(expected[0]);
+	int skipped_count = sizeof(skipped) / sizeof(skipped[0]);
+	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
+	compare_write_iterator_results(key_def, content, content_count,
 				       expected, expected_count,
-				       vlsns, vlsns_count, true, false);
+				       skipped, skipped_count,
+				       vlsns, vlsns_count, true, true, true);
 }
 {
 /*
@@ -418,13 +495,18 @@ test_basic(void)
 		STMT_TEMPLATE(9, DELETE, 1),
 	};
 	const struct vy_stmt_template expected[] = { content[1] };
+	const struct vy_stmt_template skipped[] = {
+		content[4], content[2], content[0]
+	};
 	const int vlsns[] = {5, 7, 9};
 	int content_count = sizeof(content) / sizeof(content[0]);
 	int expected_count = sizeof(expected) / sizeof(expected[0]);
+	int skipped_count = sizeof(skipped) / sizeof(skipped[0]);
 	int vlsns_count = sizeof(vlsns) / sizeof(vlsns[0]);
 	compare_write_iterator_results(key_def, content, content_count,
 				       expected, expected_count,
-				       vlsns, vlsns_count, true, false);
+				       skipped, skipped_count,
+				       vlsns, vlsns_count, true, false, true);
 }
 	box_key_def_delete(key_def);
 	fiber_gc();

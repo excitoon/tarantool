@@ -199,12 +199,26 @@ struct vy_run_env;
  * @param LSM tree is_primary - set if this iterator is for a primary index.
  * @param is_last_level - there is no older level than the one we're writing to.
  * @param read_views - Opened read views.
+ * @param track_skipped_stmts True, if skipped REPLACES must be
+ *        saved for secondary indexes.
  * @return the iterator or NULL on error (diag is set).
  */
 struct vy_stmt_stream *
 vy_write_iterator_new(const struct key_def *cmp_def, struct tuple_format *format,
 		      struct tuple_format *upsert_format, bool is_primary,
-		      bool is_last_level, struct rlist *read_views);
+		      bool is_last_level, struct rlist *read_views,
+		      bool track_skipped_stmts);
+
+/**
+ * Get a list of a skipped DELETE and REPLACE statements of a
+ * current key.
+ * @param vstream Write iterator.
+ * @param[out] count Count of a statements in a result list.
+ *
+ * @return List of a statements.
+ */
+struct tuple **
+vy_write_iterator_skipped_stmts(struct vy_stmt_stream *vstream, int *count);
 
 /**
  * Add a mem as a source to the iterator.

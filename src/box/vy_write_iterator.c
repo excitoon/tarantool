@@ -191,6 +191,18 @@ struct vy_write_iterator {
 	 */
 	int rv_used_count;
 	/**
+	 * Array of replaces, skipped by DELETE and other
+	 * REPLACES. They are needed to create surrogate deletes
+	 * by them and write into secondary index deleruns.
+	 */
+	struct tuple **skipped_stmts;
+	/** Length of @a skipped_stmts. */
+	int skipped_stmt_count;
+	/** Maximal length of @a skipped_stmts. */
+	int skipped_stmt_capacity;
+	/** True if a skipped REPLACEs must be tracked. */
+	bool track_skipped_stmts;
+	/**
 	 * Current read view in @read_views. It is used to return
 	 * key versions one by one from vy_write_iterator_next.
 	 */
@@ -332,8 +344,10 @@ static const struct vy_stmt_stream_iface vy_slice_stream_iface;
 struct vy_stmt_stream *
 vy_write_iterator_new(const struct key_def *cmp_def, struct tuple_format *format,
 		      struct tuple_format *upsert_format, bool is_primary,
-		      bool is_last_level, struct rlist *read_views)
+		      bool is_last_level, struct rlist *read_views,
+		      bool track_skipped_stmts)
 {
+	assert(!track_skipped_stmts || is_primary);
 	/*
 	 * One is reserved for INT64_MAX - maximal read view.
 	 */
@@ -349,6 +363,7 @@ vy_write_iterator_new(const struct key_def *cmp_def, struct tuple_format *format
 		diag_set(OutOfMemory, size, "malloc", "write stream");
 		return NULL;
 	}
+	stream->track_skipped_stmts = track_skipped_stmts;
 	stream->stmt_i = -1;
 	stream->rv_count = count;
 	stream->read_views[0].vlsn = INT64_MAX;
@@ -373,6 +388,40 @@ vy_write_iterator_new(const struct key_def *cmp_def, struct tuple_format *format
 }
 
 /**
+ * Track a skipped statement if it is REPLACE and tracking is on.
+ * @param wi Write iterator.
+ * @param stmt Skipped statement.
+ *
+ * @retval -1 Memory error.
+ * @retval  0 Success.
+ */
+static inline int
+vy_write_iterator_skip_stmt(struct vy_write_iterator *wi, struct tuple *stmt)
+{
+	if (!wi->track_skipped_stmts || vy_stmt_type(stmt) != IPROTO_REPLACE)
+		return 0;
+	if (wi->skipped_stmt_count + 1 > wi->skipped_stmt_capacity) {
+		int new_capacity;
+		if (wi->skipped_stmt_capacity == 0)
+			new_capacity = 512;
+		else
+			new_capacity = wi->skipped_stmt_capacity * 2;
+		size_t size = new_capacity * sizeof(wi->skipped_stmts[0]);
+		struct tuple **new_array =
+			(struct tuple **) realloc(wi->skipped_stmts, size);
+		if (new_array == NULL) {
+			diag_set(OutOfMemory, size, "realloc", "new_array");
+			return -1;
+		}
+		wi->skipped_stmts = new_array;
+		wi->skipped_stmt_capacity = new_capacity;
+	}
+	wi->skipped_stmts[wi->skipped_stmt_count++] = stmt;
+	vy_stmt_ref_if_possible(stmt);
+	return 0;
+}
+
+/**
  * Start the search. Must be called after *new* methods and
  * before *next* method.
  * @return 0 on success or not 0 on error (diag is set).
@@ -391,6 +440,18 @@ vy_write_iterator_start(struct vy_stmt_stream *vstream)
 }
 
 /**
+ * Free all skipped statements, collected for a current key.
+ * @param vstream Write iterator.
+ */
+static inline void
+vy_write_iterator_free_skipped_stmts(struct vy_write_iterator *wi)
+{
+	for (int i = 0; i < wi->skipped_stmt_count; ++i)
+		vy_stmt_unref_if_possible(wi->skipped_stmts[i]);
+	wi->skipped_stmt_count = 0;
+}
+
+/**
  * Free all resources.
  */
 static void
@@ -403,6 +464,9 @@ vy_write_iterator_stop(struct vy_stmt_stream *vstream)
 	struct vy_write_src *src, *tmp;
 	rlist_foreach_entry_safe(src, &stream->src_list, in_src_list, tmp)
 		vy_write_iterator_delete_src(stream, src);
+	vy_write_iterator_free_skipped_stmts(stream);
+	free(stream->skipped_stmts);
+	stream->skipped_stmts = NULL;
 }
 
 /**
@@ -417,6 +481,15 @@ vy_write_iterator_close(struct vy_stmt_stream *vstream)
 	tuple_format_unref(stream->format);
 	tuple_format_unref(stream->upsert_format);
 	free(stream);
+}
+
+struct tuple **
+vy_write_iterator_skipped_stmts(struct vy_stmt_stream *vstream, int *count)
+{
+	assert(vstream->iface->start == vy_write_iterator_start);
+	struct vy_write_iterator *wi = (struct vy_write_iterator *) vstream;
+	*count = wi->skipped_stmt_count;
+	return wi->skipped_stmts;
 }
 
 /**
@@ -536,6 +609,7 @@ vy_write_iterator_pop_read_view_stmt(struct vy_write_iterator *stream)
 {
 	struct vy_read_view_stmt *rv;
 	if (stream->stmt_i >= 0) {
+		vy_write_iterator_free_skipped_stmts(stream);
 		/* Destroy the current before getting to the next. */
 		rv = &stream->read_views[stream->stmt_i];
 		assert(rv->history == NULL);
@@ -621,6 +695,9 @@ vy_write_iterator_build_history(struct region *region,
 			 * view but older than the previous read view,
 			 * which is already fully built.
 			 */
+			if (vy_write_iterator_skip_stmt(stream,
+							src->tuple) != 0)
+				break;
 			goto next_lsn;
 		}
 		while (vy_stmt_lsn(src->tuple) <= merge_until_lsn) {
@@ -645,6 +722,10 @@ vy_write_iterator_build_history(struct region *region,
 		if (vy_stmt_type(src->tuple) == IPROTO_DELETE &&
 		    stream->is_last_level && merge_until_lsn == 0) {
 			current_rv_lsn = 0; /* Force skip */
+			/*
+			 * Do not track skipped DELETE, because
+			 * only REPLACEs can be tracked.
+			 */
 			goto next_lsn;
 		}
 
@@ -660,8 +741,17 @@ vy_write_iterator_build_history(struct region *region,
 			 * do not change this secondary key.
 			 */
 			if (!stream->is_primary &&
-			    key_update_can_be_skipped(key_mask, stmt_mask))
+			    key_update_can_be_skipped(key_mask, stmt_mask)) {
+				/*
+				 * Skipped statements are only
+				 * allowed for read-free REPLACE
+				 * and DELETE, when a secondary
+				 * index is not read and we can
+				 * not build column mask.
+				 */
+				assert(! stream->track_skipped_stmts);
 				goto next_lsn;
+			}
 
 			rc = vy_write_iterator_push_rv(region, stream,
 						       src->tuple,
@@ -677,6 +767,7 @@ vy_write_iterator_build_history(struct region *region,
 			goto next_lsn;
 		}
 
+		assert(! stream->track_skipped_stmts);
 		assert(vy_stmt_type(src->tuple) == IPROTO_UPSERT);
 		rc = vy_write_iterator_push_rv(region, stream, src->tuple,
 					       current_rv_i);

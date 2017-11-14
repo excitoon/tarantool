@@ -944,7 +944,8 @@ vy_task_dump_new(struct vy_scheduler *scheduler, struct vy_index *index,
 	bool is_last_level = (index->run_count == 0);
 	wi = vy_write_iterator_new(index->cmp_def, index->disk_format,
 				   index->upsert_format, index->id == 0,
-				   is_last_level, scheduler->read_views);
+				   is_last_level, scheduler->read_views,
+				   false);
 	if (wi == NULL)
 		goto err_wi;
 	rlist_foreach_entry(mem, &index->sealed, in_sealed) {
@@ -1206,7 +1207,8 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 	bool is_last_level = (range->compact_priority == range->slice_count);
 	wi = vy_write_iterator_new(index->cmp_def, index->disk_format,
 				   index->upsert_format, index->id == 0,
-				   is_last_level, scheduler->read_views);
+				   is_last_level, scheduler->read_views,
+				   false);
 	if (wi == NULL)
 		goto err_wi;
 

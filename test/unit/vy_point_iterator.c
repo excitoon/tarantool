@@ -158,7 +158,7 @@ test_basic()
 	struct vy_stmt_stream *write_stream
 		= vy_write_iterator_new(pk->cmp_def, pk->disk_format,
 					pk->upsert_format, pk->id == 0,
-					true, &read_views);
+					true, &read_views, false);
 	vy_write_iterator_new_mem(write_stream, run_mem);
 	struct vy_run *run = vy_run_new(1);
 	isnt(run, NULL, "vy_run_new");
@@ -194,7 +194,7 @@ test_basic()
 	write_stream
 		= vy_write_iterator_new(pk->cmp_def, pk->disk_format,
 					pk->upsert_format, pk->id == 0,
-					true, &read_views);
+					true, &read_views, false);
 	vy_write_iterator_new_mem(write_stream, run_mem);
 	run = vy_run_new(2);
 	isnt(run, NULL, "vy_run_new");
