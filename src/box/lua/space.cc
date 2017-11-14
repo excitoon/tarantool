@@ -70,25 +70,33 @@ lbox_push_on_replace_event(struct lua_State *L, void *event)
 	return 3;
 }
 
+
 /**
  * Set/Reset/Get space.on_replace trigger
  */
-static int
-lbox_space_on_replace(struct lua_State *L)
+static inline struct space *
+lbox_get_space(struct lua_State *L, const char *func_name)
 {
 	int top = lua_gettop(L);
 
 	if (top < 1 || !lua_istable(L, 1)) {
 		luaL_error(L,
-	   "usage: space:on_replace(function | nil, [function | nil])");
+				   "usage: space:%s(function | nil, [function | nil])",
+				   func_name);
 	}
 	lua_getfield(L, 1, "id"); /* Get space id. */
 	uint32_t id = lua_tonumber(L, lua_gettop(L));
 	struct space *space = space_cache_find_xc(id);
 	lua_pop(L, 1);
+	return space;
+}
 
+static int
+lbox_space_on_replace(struct lua_State *L)
+{
+	struct space *space = lbox_get_space(L, "on_replace");
 	return lbox_trigger_reset(L, 3, &space->on_replace,
-				  lbox_push_on_replace_event);
+							  lbox_push_on_replace_event);
 }
 
 /**
@@ -135,6 +143,7 @@ lbox_fillspace(struct lua_State *L, struct space *space, int i)
         lua_pushstring(L, "on_replace");
         lua_pushcfunction(L, lbox_space_on_replace);
         lua_settable(L, i);
+
 
 	lua_getfield(L, i, "index");
 	if (lua_isnil(L, -1)) {

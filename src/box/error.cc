@@ -148,6 +148,19 @@ ClientError::get_errcode(const struct error *e)
 	return ER_PROC_LUA;
 }
 
+#include "box.h"
+#include "trigger.h"
+struct rlist on_access_denied = RLIST_HEAD_INITIALIZER(on_access_denied);
+
+template <typename ... Args>
+AccessDeniedError::AccessDeniedError(const char *file, unsigned int line,
+									 uint32_t errcode, const char *type,
+									 const char *name, Args... args)
+		: ClientError(file, line, errcode, args...) {
+	struct access_denied_params res = {type, name};
+	trigger_run(&on_access_denied, (void *) &res);
+}
+
 const struct type_info type_XlogError = make_type("XlogError", &type_Exception);
 
 struct error *
@@ -164,3 +177,20 @@ BuildXlogError(const char *file, unsigned line, const char *format, ...)
 	}
 }
 
+const struct type_info type_AccessDeniedError = make_type("AccessDenied",
+														  &type_ClientError);
+struct error *
+BuildAccessDeniedError(const char *file, unsigned line, uint32_t errcode,
+					   const char* type, const char *name, ...)
+{
+	try {
+		va_list ap;
+		va_start(ap, name);
+		AccessDeniedError *e = new AccessDeniedError(file, line, errcode,
+													 type, name, ap);
+		va_end(ap);
+		return e;
+	} catch (OutOfMemory *e) {
+		return e;
+	}
+}

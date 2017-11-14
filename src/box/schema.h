@@ -211,4 +211,7 @@ extern struct rlist on_alter_space;
  */
 extern struct rlist on_alter_sequence;
 
+/** Triggers fired in case of access denied */
+//extern struct rlist on_access_denied;
+//struct rlist on_access_denied;
 #endif /* INCLUDES_TARANTOOL_BOX_SCHEMA_H */

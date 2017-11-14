@@ -36,7 +36,6 @@
 #include "func.h"
 #include "port.h"
 #include "scoped_guard.h"
-#include "box.h"
 #include "txn.h"
 #include "xrow.h"
 #include "iproto_constants.h"
@@ -75,10 +74,12 @@ access_check_func(const char *name, uint32_t name_len, struct func **funcp)
 	     access & ~func->access[credentials->auth_token].effective)) {
 		/* Access violation, report error. */
 		struct user *user = user_find(credentials->uid);
-		if (user != NULL)
-			diag_set(ClientError, ER_FUNCTION_ACCESS_DENIED,
-				 priv_name(access), user->def->name,
-				 tt_cstr(name, name_len));
+		if (user != NULL) {
+			const char *func_name = tt_cstr(name, name_len);
+			diag_set(AccessDeniedError, ER_FUNCTION_ACCESS_DENIED,
+					 schema_object_name(SC_FUNCTION), func_name,
+					 priv_name(access), user->def->name, func_name);
+		}
 		return -1;
 	}
 

@@ -52,6 +52,14 @@ struct ev_io;
 struct auth_request;
 
 /*
+ * struct passed to on_access trigger
+ */
+struct access_denied_params {
+	const char *type;
+	const char *name;
+};
+
+/*
  * Initialize box library
  * @throws C++ exception
  */
