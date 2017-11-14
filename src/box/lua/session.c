@@ -252,8 +252,10 @@ lbox_push_on_connect_event(struct lua_State *L, void *event)
 static int
 lbox_push_on_auth_event(struct lua_State *L, void *event)
 {
-	lua_pushstring(L, (const char *)event);
-	return 1;
+	struct auth_result *res = (struct auth_result *) event;
+	lua_pushstring(L, res->name);
+	lua_pushboolean(L, res->success);
+	return 2;
 }
 
 static int
@@ -299,7 +301,12 @@ static int
 lbox_session_run_on_auth(struct lua_State *L)
 {
 	const char *username = luaL_optstring(L, 1, "");
-	if (session_run_on_auth_triggers(username) != 0)
+	bool success = true;
+	if (lua_isboolean(L, -1)) {
+		success = lua_toboolean(L, -1);
+	}
+	struct auth_result res = {username, success};
+	if (session_run_on_auth_triggers(&res) != 0)
 		return luaT_error(L);
 	return 0;
 }

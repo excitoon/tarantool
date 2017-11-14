@@ -35,6 +35,7 @@
 #include "trigger.h"
 #include "fiber.h"
 #include "user.h"
+#include "authentication.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -239,7 +240,7 @@ session_run_on_disconnect_triggers(struct session *session);
 
 /** Run auth triggers */
 int
-session_run_on_auth_triggers(const char *user_name);
+session_run_on_auth_triggers(const struct auth_result *result);
 
 #if defined(__cplusplus)
 } /* extern "C" */

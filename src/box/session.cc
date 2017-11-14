@@ -170,9 +170,9 @@ session_run_on_connect_triggers(struct session *session)
 }
 
 int
-session_run_on_auth_triggers(const char *user_name)
+session_run_on_auth_triggers(const struct auth_result *result)
 {
-	return trigger_run(&session_on_auth, (void *)user_name);
+	return trigger_run(&session_on_auth, (void *)result);
 }
 
 void
