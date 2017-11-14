@@ -163,9 +163,8 @@ test_basic()
 	struct vy_run *run = vy_run_new(1);
 	isnt(run, NULL, "vy_run_new");
 
-	rc = vy_run_write(run, dir_name, 0, pk->id,
-			  write_stream, 4096, pk->cmp_def, pk->key_def,
-			  100500, 0.1);
+	rc = vy_run_write_one(run, dir_name, 0, pk->id, write_stream, 4096,
+			      pk->cmp_def, pk->key_def, 100500, 0.1);
 	is(rc, 0, "vy_run_write");
 
 	write_stream->iface->close(write_stream);
@@ -200,9 +199,8 @@ test_basic()
 	run = vy_run_new(2);
 	isnt(run, NULL, "vy_run_new");
 
-	rc = vy_run_write(run, dir_name, 0, pk->id,
-			  write_stream, 4096, pk->cmp_def, pk->key_def,
-			  100500, 0.1);
+	rc = vy_run_write_one(run, dir_name, 0, pk->id, write_stream, 4096,
+			      pk->cmp_def, pk->key_def, 100500, 0.1);
 	is(rc, 0, "vy_run_write");
 
 	write_stream->iface->close(write_stream);

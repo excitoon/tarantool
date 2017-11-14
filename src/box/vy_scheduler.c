@@ -631,11 +631,10 @@ vy_task_dump_execute(struct vy_task *task)
 {
 	struct vy_index *index = task->index;
 
-	return vy_run_write(task->new_run, index->env->path,
-			    index->space_id, index->id, task->wi,
-			    task->page_size, index->cmp_def,
-			    index->key_def, task->max_output_count,
-			    task->bloom_fpr);
+	return vy_run_write_one(task->new_run, index->env->path,
+				index->space_id, index->id, task->wi,
+				task->page_size, index->cmp_def, index->key_def,
+				task->max_output_count, task->bloom_fpr);
 }
 
 static int
@@ -999,11 +998,10 @@ vy_task_compact_execute(struct vy_task *task)
 {
 	struct vy_index *index = task->index;
 
-	return vy_run_write(task->new_run, index->env->path,
-			    index->space_id, index->id, task->wi,
-			    task->page_size, index->cmp_def,
-			    index->key_def, task->max_output_count,
-			    task->bloom_fpr);
+	return vy_run_write_one(task->new_run, index->env->path,
+				index->space_id, index->id, task->wi,
+				task->page_size, index->cmp_def, index->key_def,
+				task->max_output_count, task->bloom_fpr);
 }
 
 static int

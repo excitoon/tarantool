@@ -678,7 +678,7 @@ xlog_clear(struct xlog *l)
 	l->fd = -1;
 }
 
-static void
+void
 xlog_destroy(struct xlog *xlog)
 {
 	obuf_destroy(&xlog->obuf);

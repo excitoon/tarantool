@@ -354,10 +354,13 @@ xdir_create_xlog(struct xdir *dir, struct xlog *xlog,
  * @retval 0 for success
  * @retvl -1 if error
  */
-
 int
 xlog_create(struct xlog *xlog, const char *name, int flags,
 	    const struct xlog_meta *meta);
+
+/** Destroy xlog writer. */
+void
+xlog_destroy(struct xlog *xlog);
 
 /**
  * Open an existing xlog file for appending.
