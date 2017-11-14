@@ -211,4 +211,30 @@ extern struct rlist on_alter_space;
  */
 extern struct rlist on_alter_sequence;
 
+extern struct rlist on_access_denied;
+
+/*
+ * struct passed to on_access trigger
+ */
+struct access_denied_params {
+	const char *type;
+	const char *name;
+};
+
+
+#define raise_access_denied(type, name, ...) do { 	\
+	struct access_denied_params res = {type, name};	\
+	trigger_run_xc(&on_access_denied, &res);				\
+	tnt_raise(__VA_ARGS__);							\
+} while(0)
+
+#define diag_set_access_denied(type, name, ...) do { 	\
+	struct access_denied_params res = {type, name};	\
+	trigger_run(&on_access_denied, &res);				\
+	diag_set(__VA_ARGS__);							\
+} while(0)
+
+void
+access_check_universe(uint8_t access);
+
 #endif /* INCLUDES_TARANTOOL_BOX_SCHEMA_H */

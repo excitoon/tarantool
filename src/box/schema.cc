@@ -39,6 +39,7 @@
 #include "alter.h"
 #include "scoped_guard.h"
 #include "version.h"
+#include "session.h"
 #include <stdio.h>
 /**
  * @module Data Dictionary
@@ -65,7 +66,7 @@ uint32_t dd_version_id = version_id(1, 6, 4);
 
 struct rlist on_alter_space = RLIST_HEAD_INITIALIZER(on_alter_space);
 struct rlist on_alter_sequence = RLIST_HEAD_INITIALIZER(on_alter_sequence);
-
+struct rlist on_access_denied = RLIST_HEAD_INITIALIZER(on_access_denied);
 /**
  * Lock of scheme modification
  */
@@ -519,5 +520,23 @@ sequence_cache_delete(uint32_t id)
 		free(seq->def);
 		TRASH(seq);
 		free(seq);
+	}
+}
+
+void
+access_check_universe(uint8_t access)
+{
+	struct credentials *credentials = current_user();
+	if (!(credentials->universal_access & access)) {
+		/*
+		 * Access violation, report error.
+		 * The user may not exist already, if deleted
+		 * from a different connection.
+		 */
+		struct user *user = user_find_xc(credentials->uid);
+		raise_access_denied(schema_object_name(SC_UNIVERSE), "universe",
+							ClientError, ER_ACCESS_DENIED,
+							priv_name(access), schema_object_name(SC_UNIVERSE),
+							user->def->name);
 	}
 }
