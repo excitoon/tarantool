@@ -3844,9 +3844,9 @@ vinyl_iterator_close(struct vinyl_iterator *it)
 }
 
 static int
-vinyl_iterator_next(struct iterator *base, struct tuple **ret)
+vinyl_iterator_secondary_next(struct iterator *base, struct tuple **ret)
 {
-	assert(base->next = vinyl_iterator_next);
+	assert(base->next = vinyl_iterator_secondary_next);
 	struct vinyl_iterator *it = (struct vinyl_iterator *)base;
 	struct tuple *tuple;
 
@@ -3868,19 +3868,46 @@ vinyl_iterator_next(struct iterator *base, struct tuple **ret)
 		*ret = NULL;
 		return 0;
 	}
+	/* Get the full tuple from the primary index. */
+	if (vy_index_full_by_stmt(it->env, it->tx, it->index,
+				  tuple, &tuple) != 0)
+		goto fail;
+	*ret = tuple_bless(tuple);
+	tuple_unref(tuple);
+	if (*ret != NULL)
+		return 0;
+fail:
+	vinyl_iterator_close(it);
+	return -1;
+}
 
-	if (it->index->id > 0) {
-		/* Get the full tuple from the primary index. */
-		if (vy_index_full_by_stmt(it->env, it->tx, it->index,
-					  tuple, &tuple) != 0)
+static int
+vinyl_iterator_primary_next(struct iterator *base, struct tuple **ret)
+{
+	assert(base->next = vinyl_iterator_primary_next);
+	struct vinyl_iterator *it = (struct vinyl_iterator *)base;
+	struct tuple *tuple;
+
+	if (it->tx == NULL) {
+		diag_set(ClientError, ER_CURSOR_NO_TRANSACTION);
+		goto fail;
+	}
+	if (it->tx->state == VINYL_TX_ABORT || it->tx->read_view->is_aborted) {
+		diag_set(ClientError, ER_READ_VIEW_ABORTED);
+		goto fail;
+	}
+
+	if (vy_read_iterator_next(&it->iterator, &tuple) != 0)
+		goto fail;
+	vy_read_iterator_cache_last(&it->iterator);
+	if (tuple != NULL) {
+		*ret = tuple_bless(tuple);
+		if (*ret == NULL)
 			goto fail;
 	} else {
-		tuple_ref(tuple);
+		*ret = NULL;
+		vinyl_iterator_close(it);
 	}
-	*ret = tuple_bless(tuple);
-	tuple_unref(*ret);
-	if (*ret == NULL)
-		goto fail;
 	return 0;
 fail:
 	vinyl_iterator_close(it);
@@ -3923,7 +3950,10 @@ vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 	}
 
 	iterator_create(&it->base, base);
-	it->base.next = vinyl_iterator_next;
+	if (index->id == 0)
+		it->base.next = vinyl_iterator_primary_next;
+	else
+		it->base.next = vinyl_iterator_secondary_next;
 	it->base.free = vinyl_iterator_free;
 
 	it->env = env;
