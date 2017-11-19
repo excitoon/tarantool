@@ -124,6 +124,14 @@ struct vy_read_iterator {
 	 * front_id from the previous iteration.
 	 */
 	uint32_t prev_front_id;
+	/*
+	 * Statement before the last_stmt to be added to a cache.
+	 * Can be NULL, if a read iterator returned < 2 tuples or
+	 * if it read IPROTO_DELETE from txw during the last_stmt
+	 * reading. For details about DELETE @sa
+	 * vy_read_iterator_next().
+	 */
+	struct tuple *cache_prev;
 };
 
 /**
@@ -154,6 +162,13 @@ vy_read_iterator_open(struct vy_read_iterator *itr, struct vy_run_env *run_env,
  */
 NODISCARD int
 vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result);
+
+/**
+ * Track a statement, returned on a previous step, in a cache.
+ * @param itr Read iterator.
+ */
+void
+vy_read_iterator_cache_last(struct vy_read_iterator *itr);
 
 /**
  * Close the iterator and free resources.

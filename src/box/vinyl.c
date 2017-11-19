@@ -1274,6 +1274,8 @@ vy_index_get(struct vy_env *env, struct vy_tx *tx, struct vy_index *index,
 	vy_read_iterator_open(&itr, &env->run_env, index, tx, ITER_EQ, vykey,
 			      p_read_view, env->too_long_threshold);
 	int rc = vy_read_iterator_next(&itr, result);
+	if (rc == 0)
+		vy_read_iterator_cache_last(&itr);
 	tuple_unref(vykey);
 	if (*result != NULL)
 		tuple_ref(*result);
@@ -3559,8 +3561,11 @@ vy_squash_process(struct vy_squash *squash)
 			      env->too_long_threshold);
 	struct tuple *result;
 	int rc = vy_read_iterator_next(&itr, &result);
-	if (rc == 0 && result != NULL)
-		tuple_ref(result);
+	if (rc == 0) {
+		vy_read_iterator_cache_last(&itr);
+		if (result != NULL)
+			tuple_ref(result);
+	}
 	vy_read_iterator_close(&itr);
 	if (rc != 0)
 		return -1;
@@ -3856,7 +3861,7 @@ vinyl_iterator_next(struct iterator *base, struct tuple **ret)
 
 	if (vy_read_iterator_next(&it->iterator, &tuple) != 0)
 		goto fail;
-
+	vy_read_iterator_cache_last(&it->iterator);
 	if (tuple == NULL) {
 		/* EOF. Close the iterator immediately. */
 		vinyl_iterator_close(it);

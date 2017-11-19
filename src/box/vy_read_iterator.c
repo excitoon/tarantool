@@ -795,6 +795,8 @@ vy_read_iterator_cleanup(struct vy_read_iterator *itr)
 
 	if (itr->curr_stmt != NULL)
 		tuple_unref(itr->curr_stmt);
+	if (itr->cache_prev != NULL)
+		tuple_unref(itr->cache_prev);
 	itr->curr_stmt = NULL;
 	itr->curr_src = UINT32_MAX;
 	itr->txw_src = UINT32_MAX;
@@ -958,7 +960,7 @@ vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 
 	/* The key might be set to NULL during previous call, that means
 	 * that there's no more data */
-	if (itr->key == NULL) {
+	if (itr->curr_range == NULL && itr->search_started) {
 		*result = NULL;
 		return 0;
 	}
@@ -966,6 +968,7 @@ vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 	/* Run a special iterator for a special case */
 	if ((itr->iterator_type == ITER_EQ || itr->iterator_type == ITER_REQ) &&
 	    tuple_field_count(itr->key) >= itr->index->cmp_def->part_count) {
+		itr->search_started = true;
 		struct vy_point_iterator one;
 		vy_point_iterator_open(&one, itr->run_env, itr->index,
 				       itr->tx, itr->read_view, itr->key);
@@ -975,7 +978,7 @@ vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 			itr->last_stmt = *result;
 		}
 		vy_point_iterator_close(&one);
-		itr->key = NULL;
+		itr->curr_range = NULL;
 		return rc;
 	}
 
@@ -1049,22 +1052,18 @@ vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 	}
 #endif
 
-	/**
-	 * Add a statement to the cache
+	if (itr->cache_prev != NULL)
+		goto clear;
+	/*
+	 * If we skipped DELETE that was read from TX write set,
+	 * there is a chance that the database actually has the
+	 * deleted key and we must not consider previous+current
+	 * tuple as an unbroken chain.
 	 */
-	if ((**itr->read_view).vlsn == INT64_MAX) { /* Do not store non-latest data */
-		struct tuple *cache_prev = prev_key;
-		if (skipped_txw_delete) {
-			/*
-			 * If we skipped DELETE that was read from TX write
-			 * set, there is a chance that the database actually
-			 * has the deleted key and we must not consider
-			 * previous+current tuple as an unbroken chain.
-			 */
-			cache_prev = NULL;
-		}
-		vy_cache_add(&itr->index->cache, *result, cache_prev,
-			     itr->key, itr->iterator_type);
+	if (! skipped_txw_delete) {
+		itr->cache_prev = prev_key;
+		if (prev_key != NULL)
+			tuple_ref(prev_key);
 	}
 clear:
 	if (prev_key != NULL)
@@ -1080,6 +1079,20 @@ clear:
 			 vy_stmt_str(itr->last_stmt), latency);
 	}
 	return rc;
+}
+
+void
+vy_read_iterator_cache_last(struct vy_read_iterator *itr)
+{
+	/* Do not store non-latest data */
+	if ((**itr->read_view).vlsn == INT64_MAX) {
+		vy_cache_add(&itr->index->cache, itr->last_stmt,
+			     itr->cache_prev, itr->key, itr->iterator_type);
+		if (itr->cache_prev != NULL) {
+			tuple_unref(itr->cache_prev);
+			itr->cache_prev = NULL;
+		}
+	}
 }
 
 /**
