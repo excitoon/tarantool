@@ -1253,6 +1253,7 @@ static inline int
 vy_index_get(struct vy_env *env, struct vy_tx *tx, struct vy_index *index,
 	     const char *key, uint32_t part_count, struct tuple **result)
 {
+	assert(index->opts.is_unique);
 	/*
 	 * tx can be NULL, for example, if an user calls
 	 * space.index.get({key}).
@@ -1646,15 +1647,38 @@ vy_index_full_by_key(struct vy_env *env, struct vy_tx *tx,
 		     struct vy_index *index, const char *key,
 		     uint32_t part_count, struct tuple **result)
 {
-	struct tuple *found;
-	if (vy_index_get(env, tx, index, key, part_count, &found))
+	assert(tx == NULL || tx->state == VINYL_TX_READY);
+	assert(part_count <= index->cmp_def->part_count);
+	struct tuple *vykey = vy_stmt_new_select(index->env->key_format, key,
+						 part_count);
+	if (vykey == NULL)
 		return -1;
+	const struct vy_read_view **p_read_view;
+	if (tx != NULL)
+		p_read_view = (const struct vy_read_view **) &tx->read_view;
+	else
+		p_read_view = &env->xm->p_global_read_view;
+
+	struct vy_read_iterator itr;
+	struct tuple *found;
+	vy_read_iterator_open(&itr, &env->run_env, index, tx, ITER_EQ, vykey,
+			      p_read_view, env->too_long_threshold);
+	int rc = vy_read_iterator_next(&itr, &found);
+	if (rc != 0)
+		goto done;
 	if (index->id == 0 || found == NULL) {
 		*result = found;
-		return 0;
+		if (found != NULL)
+			tuple_ref(found);
+		vy_read_iterator_cache_last(&itr);
+		goto done;
 	}
-	int rc = vy_index_full_by_stmt(env, tx, index, found, result);
-	tuple_unref(found);
+	rc = vy_index_full_by_stmt(env, tx, index, found, result);
+	assert(rc != 0 || *result != NULL);
+	vy_read_iterator_cache_last(&itr);
+done:
+	tuple_unref(vykey);
+	vy_read_iterator_close(&itr);
 	return rc;
 }
 
