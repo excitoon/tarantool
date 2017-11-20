@@ -103,18 +103,26 @@ struct vy_task_ops {
 		      bool in_shutdown);
 };
 
+/** Index and run, used by a task. */
+struct vy_task_index {
+	/** Index used by a task. */
+	struct vy_index *vy_index;
+	/** New run of the index. */
+	struct vy_run *new_run;
+	/** Slice array created for the run on complete. */
+	struct vy_slice_array *slice_array;
+	/** Member of a task indexes list. */
+	struct stailq_entry in_task;
+};
+
 struct vy_task {
 	const struct vy_task_ops *ops;
 	/** Return code of ->execute. */
 	int status;
 	/** If ->execute fails, the error is stored here. */
 	struct diag diag;
-	/** Index this task is for. */
-	struct vy_index *index;
 	/** Range to compact. */
 	struct vy_range *range;
-	/** Run written by this task. */
-	struct vy_run *new_run;
 	/** Write iterator producing statements for the new run. */
 	struct vy_stmt_stream *wi;
 	/**
@@ -143,17 +151,15 @@ struct vy_task {
 	 */
 	double bloom_fpr;
 	int64_t page_size;
+	/** Length of @a index. */
+	int index_count;
+	/** Indexes used by this task. */
+	struct vy_task_index index;
 };
 
-/**
- * Allocate a new task to be executed by a worker thread.
- * When preparing an asynchronous task, this function must
- * be called before yielding the current fiber in order to
- * pin the index the task is for so that a concurrent fiber
- * does not free it from under us.
- */
+/** Allocate a new task to be executed by a worker thread. */
 static struct vy_task *
-vy_task_new(struct mempool *pool, struct vy_index *index,
+vy_task_new(struct mempool *pool, int index_count,
 	    const struct vy_task_ops *ops)
 {
 	struct vy_task *task = mempool_alloc(pool);
@@ -163,19 +169,66 @@ vy_task_new(struct mempool *pool, struct vy_index *index,
 		return NULL;
 	}
 	memset(task, 0, sizeof(*task));
+	task->index_count = index_count;
+	if (index_count > 1) {
+		--index_count;
+		struct vy_task_index *secondary_indexes =
+			(struct vy_task_index *)
+			calloc(index_count, sizeof(*secondary_indexes));
+		if (secondary_indexes == NULL) {
+			diag_set(OutOfMemory,
+				 index_count * sizeof(*secondary_indexes),
+				 "malloc", "secondary_indexes");
+			mempool_free(pool, task);
+			return NULL;
+		}
+		for (int i = 0; i < index_count - 1; ++i) {
+			secondary_indexes[i].in_task.next =
+				&secondary_indexes[i + 1].in_task;
+		}
+		task->index.in_task.next = &secondary_indexes[0].in_task;
+	}
 	task->ops = ops;
-	task->index = index;
-	vy_index_ref(index);
 	diag_create(&task->diag);
 	return task;
+}
+
+/**
+ * When preparing an asynchronous task, this function must
+ * be called for each index before yielding the current fiber in
+ * order to pin the index the task is for so that a concurrent
+ * fiber does not free it from under us.
+ */
+static void
+vy_task_add_index(struct vy_task *task, struct vy_index *index,
+		  struct vy_run *new_run)
+{
+	struct vy_task_index *task_index;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		if (task_index->vy_index == NULL)
+			break;
+	}
+	assert(task_index->new_run == NULL);
+	task_index->vy_index = index;
+	vy_index_ref(index);
+	task_index->new_run = new_run;
 }
 
 /** Free a task allocated with vy_task_new(). */
 static void
 vy_task_delete(struct mempool *pool, struct vy_task *task)
 {
-	vy_index_unref(task->index);
+	struct vy_task_index *task_index;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		if (task_index->vy_index != NULL)
+			vy_index_unref(task_index->vy_index);
+		free(task_index->slice_array);
+	}
 	diag_destroy(&task->diag);
+	if (task->index.in_task.next != NULL) {
+		free(stailq_entry(task->index.in_task.next,
+				  struct vy_task_index, in_task));
+	}
 	TRASH(task);
 	mempool_free(pool, task);
 }
@@ -626,15 +679,92 @@ vy_run_discard(struct vy_run *run)
 	}
 }
 
+/**
+ * Discard new runs.
+ * @param task Task which owns these runs.
+ * @param only_empty Discard only empty runs.
+ */
+static inline void
+vy_task_discard_new_runs(struct vy_task *task, bool only_empty)
+{
+	struct vy_task_index *task_index;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		if (!only_empty || vy_run_is_empty(task_index->new_run)) {
+			vy_run_discard(task_index->new_run);
+			task_index->new_run = NULL;
+		}
+	}
+}
+
+/**
+ * Unref all new runs, hold by @a task.
+ * @param task Task in which unref runs.
+ */
+static inline void
+vy_task_unref_new_runs(struct vy_task *task)
+{
+	struct vy_task_index *task_index;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		if (task_index->new_run != NULL) {
+			vy_run_unref(task_index->new_run);
+			task_index->new_run = NULL;
+		}
+	}
+}
+
+/**
+ * Allocate and initialize array of run writers used indexes of
+ * @a task.
+ * @param task Task with indexes list.
+ *
+ * @retval not NULL Array of writers with task->index_count
+ *         elements.
+ * @retval     NULL Memory error.
+ */
+static struct vy_run_writer *
+vy_task_writers_new(struct vy_task *task)
+{
+	int size = task->index_count * sizeof(struct vy_run_writer);
+	struct vy_run_writer *writers = (struct vy_run_writer *) malloc(size);
+	if (writers == NULL) {
+		diag_set(OutOfMemory, size, "malloc", "writers");
+		return NULL;
+	}
+	struct vy_task_index *task_index;
+	int i = 0;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		struct vy_index *vy_index = task_index->vy_index;
+		if (vy_run_writer_create(&writers[i], task_index->new_run,
+					 vy_index->env->path,
+					 vy_index->space_id, vy_index->id,
+					 task->page_size, vy_index->cmp_def,
+					 vy_index->key_def,
+					 task->bloom_fpr,
+					 task->max_output_count) != 0)
+			goto error;
+		++i;
+	}
+	return writers;
+
+error:
+	for (int j = 0; j < i; ++j)
+		vy_run_writer_abort(&writers[j]);
+	free(writers);
+	return NULL;
+}
+
+/** Flush write iterator tuples into run writers. */
 static int
 vy_task_execute(struct vy_task *task)
 {
-	struct vy_index *index = task->index;
-
-	return vy_run_write_one(task->new_run, index->env->path,
-				index->space_id, index->id, task->wi,
-				task->page_size, index->cmp_def, index->key_def,
-				task->max_output_count, task->bloom_fpr);
+	if (task->max_output_count == 0)
+		return 0;
+	struct vy_run_writer *writers = vy_task_writers_new(task);
+	if (writers == NULL)
+		return -1;
+	int rc = vy_run_write(task->wi, writers, task->index_count);
+	free(writers);
+	return rc;
 }
 
 /** Array of slices, restricted with begin and end. */
@@ -803,94 +933,115 @@ vy_slice_array_spread_on_ranges(struct vy_slice_array *slice_array,
 static int
 vy_task_dump_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 {
-	struct vy_index *index = task->index;
-	struct vy_run *new_run = task->new_run;
-	int64_t dump_lsn = new_run->dump_lsn;
 	struct vy_mem *mem, *next_mem;
 	int loops = 0;
-
-	assert(index->is_dumping);
-
-	if (vy_run_is_empty(new_run)) {
-		/*
-		 * In case the run is empty, we can discard the run
-		 * and delete dumped in-memory trees right away w/o
-		 * inserting slices into ranges. However, we need
-		 * to log index dump anyway.
-		 */
-		vy_log_tx_begin();
-		vy_log_dump_index(index->commit_lsn, dump_lsn);
-		if (vy_log_tx_commit() < 0)
-			return -1;
-		vy_run_discard(new_run);
-		goto delete_mems;
+	struct vy_index *dumped_index = task->index.vy_index;
+	int64_t dump_lsn = task->index.new_run->dump_lsn;
+	struct vy_task_index *task_index;
+	/* Create slices for all not empty runs. */
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		if (! vy_run_is_empty(new_run)) {
+			task_index->slice_array =
+				vy_slice_array_new(vy_index, new_run, &loops);
+			if (task_index->slice_array == NULL)
+				goto fail_free_slices;
+		}
 	}
-	struct vy_slice_array *slice_array =
-		vy_slice_array_new(index, new_run, &loops);
-	if (slice_array == NULL)
-		return -1;
 	/*
-	 * Log change in metadata.
+	 * Log change in metadata. Can not fail during log
+	 * writing.
 	 */
+	int i = 0;
 	vy_log_tx_begin();
-	vy_slice_array_log(slice_array, new_run->id, dump_lsn, index, &loops);
-	vy_log_dump_index(index->commit_lsn, dump_lsn);
-	if (vy_log_tx_commit() < 0) {
-		vy_slice_array_delete(slice_array, &loops);
-		return -1;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		int64_t new_lsn = new_run->dump_lsn;
+		if (! vy_run_is_empty(new_run)) {
+			vy_slice_array_log(task_index->slice_array, new_run->id,
+					   new_lsn, vy_index, &loops);
+		}
+		if (i == 0) {
+			vy_log_dump_index(vy_index->commit_lsn, new_lsn);
+			if (! vy_run_is_empty(new_run)) {
+				assert(vy_index->is_dumping);
+				assert(new_run->info.min_lsn >
+				       vy_index->dump_lsn);
+				assert(new_run->info.max_lsn <= new_lsn);
+			}
+		}
+		++i;
 	}
+	if (vy_log_tx_commit() < 0)
+		goto fail_free_slices;
 
-	/*
-	 * Account the new run.
-	 */
-	vy_index_add_run(index, new_run);
-	vy_stmt_counter_add_disk(&index->stat.disk.dump.out, &new_run->count);
+	/* Discard empty runs. */
+	vy_task_discard_new_runs(task, true);
+
+	/* Account the new runs. */
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		/* Empty runs are discarded and nullified. */
+		if (new_run != NULL) {
+			vy_index_add_run(vy_index, new_run);
+			vy_stmt_counter_add_disk(&vy_index->stat.disk.dump.out,
+						 &new_run->count);
+			vy_slice_array_spread_on_ranges(task_index->slice_array,
+							vy_index, &loops);
+		}
+	}
 
 	/* Drop the reference held by the task. */
-	vy_run_unref(new_run);
+	vy_task_unref_new_runs(task);
 
-	/*
-	 * Add new slices to ranges.
-	 */
-	vy_slice_array_spread_on_ranges(slice_array, index, &loops);
-	free(slice_array);
-
-delete_mems:
-	/*
-	 * Delete dumped in-memory trees.
-	 */
-	rlist_foreach_entry_safe(mem, &index->sealed, in_sealed, next_mem) {
+	/* Delete dumped in-memory trees. */
+	rlist_foreach_entry_safe(mem, &dumped_index->sealed, in_sealed,
+				 next_mem) {
 		if (mem->generation > scheduler->dump_generation)
 			continue;
-		vy_stmt_counter_add(&index->stat.disk.dump.in, &mem->count);
-		vy_index_delete_mem(index, mem);
+		vy_stmt_counter_add(&dumped_index->stat.disk.dump.in,
+				    &mem->count);
+		vy_index_delete_mem(dumped_index, mem);
 	}
-	index->dump_lsn = dump_lsn;
-	index->stat.disk.dump.count++;
+	dumped_index->dump_lsn = dump_lsn;
+	dumped_index->stat.disk.dump.count++;
 
 	/* The iterator has been cleaned up in a worker thread. */
 	task->wi->iface->close(task->wi);
 
-	index->is_dumping = false;
-	vy_scheduler_update_index(scheduler, index);
+	dumped_index->is_dumping = false;
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task)
+		vy_scheduler_update_index(scheduler, task_index->vy_index);
 
-	if (index->id != 0)
-		vy_scheduler_unpin_index(scheduler, index->pk);
+	if (dumped_index->id != 0)
+		vy_scheduler_unpin_index(scheduler, dumped_index->pk);
 
 	assert(scheduler->dump_task_count > 0);
 	scheduler->dump_task_count--;
 
 	vy_scheduler_complete_dump(scheduler);
 
-	say_info("%s: dump completed", vy_index_name(index));
+	say_info("%s: dump completed", vy_index_name(dumped_index));
 	return 0;
+
+fail_free_slices:
+	stailq_entry_foreach(task_index, &task->index.in_task, in_task) {
+		if (task_index->slice_array == NULL)
+			break;
+		vy_slice_array_delete(task_index->slice_array, &loops);
+		task_index->slice_array = NULL;
+	}
+	return -1;
 }
 
 static void
 vy_task_dump_abort(struct vy_scheduler *scheduler, struct vy_task *task,
 		   bool in_shutdown)
 {
-	struct vy_index *index = task->index;
+	struct vy_index *index = task->index.vy_index;
 
 	assert(index->is_dumping);
 
@@ -908,9 +1059,9 @@ vy_task_dump_abort(struct vy_scheduler *scheduler, struct vy_task *task,
 
 	/* The metadata log is unavailable on shutdown. */
 	if (!in_shutdown)
-		vy_run_discard(task->new_run);
+		vy_task_discard_new_runs(task, false);
 	else
-		vy_run_unref(task->new_run);
+		vy_task_unref_new_runs(task);
 
 	index->is_dumping = false;
 	vy_scheduler_update_index(scheduler, index);
@@ -997,24 +1148,45 @@ vy_task_dump_new(struct vy_scheduler *scheduler, struct vy_index *index,
 		return 0;
 	}
 
-	struct vy_task *task = vy_task_new(&scheduler->task_pool,
-					   index, &dump_ops);
+	int index_count = 1;
+	bool track_skipped_statements;
+	if (index->id == 0 && index->are_secondary_indexes_not_unique) {
+		track_skipped_statements = true;
+		for (struct vy_index *idx = index->next; idx != NULL;
+		     idx = idx->next)
+			++index_count;
+	} else {
+		track_skipped_statements = false;
+	}
+
+	struct vy_task *task = vy_task_new(&scheduler->task_pool, index_count,
+					   &dump_ops);
 	if (task == NULL)
 		goto err;
 
+	assert(dump_lsn >= 0);
 	struct vy_run *new_run = vy_run_prepare(index);
 	if (new_run == NULL)
 		goto err_run;
-
-	assert(dump_lsn >= 0);
+	vy_task_add_index(task, index, new_run);
 	new_run->dump_lsn = dump_lsn;
+	if (track_skipped_statements) {
+		for (struct vy_index *idx = index->next; idx != NULL;
+		     idx = idx->next) {
+			struct vy_run *new_delerun = vy_run_prepare(idx);
+			if (new_delerun == NULL)
+				goto err_run;
+			vy_task_add_index(task, idx, new_delerun);
+			new_delerun->dump_lsn = idx->dump_lsn;
+		}
+	}
 
 	struct vy_stmt_stream *wi;
 	bool is_last_level = (index->run_count == 0);
 	wi = vy_write_iterator_new(index->cmp_def, index->disk_format,
 				   index->upsert_format, index->id == 0,
 				   is_last_level, scheduler->read_views,
-				   false);
+				   track_skipped_statements);
 	if (wi == NULL)
 		goto err_wi;
 	rlist_foreach_entry(mem, &index->sealed, in_sealed) {
@@ -1024,7 +1196,6 @@ vy_task_dump_new(struct vy_scheduler *scheduler, struct vy_index *index,
 			goto err_wi_sub;
 	}
 
-	task->new_run = new_run;
 	task->wi = wi;
 	task->max_output_count = max_output_count;
 	task->bloom_fpr = index->opts.bloom_fpr;
@@ -1054,7 +1225,7 @@ vy_task_dump_new(struct vy_scheduler *scheduler, struct vy_index *index,
 err_wi_sub:
 	task->wi->iface->close(wi);
 err_wi:
-	vy_run_discard(new_run);
+	vy_task_discard_new_runs(task, false);
 err_run:
 	vy_task_delete(&scheduler->task_pool, task);
 err:
@@ -1066,9 +1237,9 @@ err:
 static int
 vy_task_compact_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 {
-	struct vy_index *index = task->index;
+	struct vy_index *index = task->index.vy_index;
 	struct vy_range *range = task->range;
-	struct vy_run *new_run = task->new_run;
+	struct vy_run *new_run = task->index.new_run;
 	struct vy_slice *first_slice = task->first_slice;
 	struct vy_slice *last_slice = task->last_slice;
 	struct vy_slice *slice, *next_slice, *new_slice = NULL;
@@ -1086,6 +1257,18 @@ vy_task_compact_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 					 index->cmp_def);
 		if (new_slice == NULL)
 			return -1;
+	}
+	/* Allocate slice arrays for secondary indexes. */
+	struct vy_task_index *task_index;
+	stailq_entry_foreach(task_index, task->index.in_task.next, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		if (! vy_run_is_empty(new_run)) {
+			task_index->slice_array =
+				vy_slice_array_new(vy_index, new_run, NULL);
+			if (task_index->slice_array == NULL)
+				goto fail_free_slices;
+		}
 	}
 
 	/*
@@ -1126,24 +1309,44 @@ vy_task_compact_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 				    tuple_data_or_null(new_slice->begin),
 				    tuple_data_or_null(new_slice->end));
 	}
-	if (vy_log_tx_commit() < 0) {
-		if (new_slice != NULL)
-			vy_slice_delete(new_slice);
-		return -1;
+	/* Log secondary index deleruns. */
+	stailq_entry_foreach(task_index, task->index.in_task.next, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		int64_t new_lsn = new_run->dump_lsn;
+		if (! vy_run_is_empty(new_run)) {
+			vy_slice_array_log(task_index->slice_array, new_run->id,
+					   new_lsn, vy_index, NULL);
+		}
 	}
+	if (vy_log_tx_commit() < 0)
+		goto fail_free_slices;
 
-	/*
-	 * Account the new run if it is not empty,
-	 * otherwise discard it.
-	 */
+	/* Discard empty runs. */
+	vy_task_discard_new_runs(task, true);
+
+	/* Account the new runs. */
 	if (new_slice != NULL) {
 		vy_index_add_run(index, new_run);
 		vy_stmt_counter_add_disk(&index->stat.disk.compact.out,
 					 &new_run->count);
-		/* Drop the reference held by the task. */
-		vy_run_unref(new_run);
-	} else
-		vy_run_discard(new_run);
+	}
+	stailq_entry_foreach(task_index, task->index.in_task.next, in_task) {
+		struct vy_run *new_run = task_index->new_run;
+		struct vy_index *vy_index = task_index->vy_index;
+		/* Empty runs are discarded and nullified. */
+		if (new_run != NULL) {
+			vy_index_add_run(vy_index, new_run);
+			vy_stmt_counter_add_disk(&vy_index->stat.disk.dump.out,
+						 &new_run->count);
+			vy_slice_array_spread_on_ranges(task_index->slice_array,
+							vy_index, NULL);
+			vy_scheduler_update_index(scheduler, vy_index);
+		}
+	}
+
+	/* Drop the reference held by the task. */
+	vy_task_unref_new_runs(task);
 
 	/*
 	 * Replace compacted slices with the resulting slice.
@@ -1193,13 +1396,24 @@ vy_task_compact_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 	say_info("%s: completed compacting range %s",
 		 vy_index_name(index), vy_range_str(range));
 	return 0;
+
+fail_free_slices:
+	stailq_entry_foreach(task_index, task->index.in_task.next, in_task) {
+		if (task_index->slice_array == NULL)
+			break;
+		vy_slice_array_delete(task_index->slice_array, NULL);
+		task_index->slice_array = NULL;
+	}
+	if (new_slice != NULL)
+		vy_slice_delete(new_slice);
+	return -1;
 }
 
 static void
 vy_task_compact_abort(struct vy_scheduler *scheduler, struct vy_task *task,
 		      bool in_shutdown)
 {
-	struct vy_index *index = task->index;
+	struct vy_index *index = task->index.vy_index;
 	struct vy_range *range = task->range;
 
 	/* The iterator has been cleaned up in worker. */
@@ -1217,9 +1431,9 @@ vy_task_compact_abort(struct vy_scheduler *scheduler, struct vy_task *task,
 
 	/* The metadata log is unavailable on shutdown. */
 	if (!in_shutdown)
-		vy_run_discard(task->new_run);
+		vy_task_discard_new_runs(task, false);
 	else
-		vy_run_unref(task->new_run);
+		vy_task_unref_new_runs(task);
 
 	assert(range->heap_node.pos == UINT32_MAX);
 	vy_range_heap_insert(&index->range_heap, &range->heap_node);
@@ -1252,21 +1466,43 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 		return 0;
 	}
 
+	int index_count = 1;
+	bool track_skipped_statements;
+	if (index->id == 0 && index->are_secondary_indexes_not_unique) {
+		track_skipped_statements = true;
+		for (struct vy_index *idx = index->next; idx != NULL;
+		     idx = idx->next)
+			++index_count;
+	} else {
+		track_skipped_statements = false;
+	}
+
 	struct vy_task *task = vy_task_new(&scheduler->task_pool,
-					   index, &compact_ops);
+					   index_count, &compact_ops);
 	if (task == NULL)
 		goto err_task;
 
 	struct vy_run *new_run = vy_run_prepare(index);
 	if (new_run == NULL)
 		goto err_run;
+	vy_task_add_index(task, index, new_run);
+	if (track_skipped_statements) {
+		for (struct vy_index *idx = index->next; idx != NULL;
+		     idx = idx->next) {
+			struct vy_run *new_delerun = vy_run_prepare(idx);
+			if (new_delerun == NULL)
+				goto err_run;
+			vy_task_add_index(task, idx, new_delerun);
+			new_delerun->dump_lsn = idx->dump_lsn;
+		}
+	}
 
 	struct vy_stmt_stream *wi;
 	bool is_last_level = (range->compact_priority == range->slice_count);
 	wi = vy_write_iterator_new(index->cmp_def, index->disk_format,
 				   index->upsert_format, index->id == 0,
 				   is_last_level, scheduler->read_views,
-				   false);
+				   track_skipped_statements);
 	if (wi == NULL)
 		goto err_wi;
 
@@ -1293,7 +1529,6 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 	assert(new_run->dump_lsn >= 0);
 
 	task->range = range;
-	task->new_run = new_run;
 	task->wi = wi;
 	task->bloom_fpr = index->opts.bloom_fpr;
 	task->page_size = index->opts.page_size;
@@ -1315,7 +1550,7 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 err_wi_sub:
 	task->wi->iface->close(wi);
 err_wi:
-	vy_run_discard(new_run);
+	vy_task_discard_new_runs(task, false);
 err_run:
 	vy_task_delete(&scheduler->task_pool, task);
 err_task:
@@ -1461,7 +1696,7 @@ static int
 vy_scheduler_complete_task(struct vy_scheduler *scheduler,
 			   struct vy_task *task)
 {
-	if (task->index->is_dropped) {
+	if (task->index.vy_index->is_dropped) {
 		if (task->ops->abort)
 			task->ops->abort(scheduler, task, false);
 		return 0;

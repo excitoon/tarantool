@@ -395,16 +395,6 @@ vy_run_snprint_path(char *buf, int size, const char *dir,
 }
 
 /**
- * Write statements returned by a write iterator to a new run
- * file, create an index file.
- */
-int
-vy_run_write_one(struct vy_run *run, const char *dirpath, uint32_t space_id,
-		 uint32_t iid, struct vy_stmt_stream *wi, uint64_t page_size,
-		 const struct key_def *cmp_def, const struct key_def *key_def,
-		 size_t max_output_count, double bloom_fpr);
-
-/**
  * Allocate a new run slice.
  * This function increments @run->refs.
  */
@@ -611,12 +601,14 @@ vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
  * Write a specified statement into a run.
  * @param writer Writer to write a statement.
  * @param stmt Statement to write.
+ * @param stmt_type With which type append @a stmt.
  *
  * @retval -1 Memory error.
  * @retval  0 Success.
  */
 int
-vy_run_writer_append_stmt(struct vy_run_writer *writer, struct tuple *stmt);
+vy_run_writer_append_stmt(struct vy_run_writer *writer, struct tuple *stmt,
+			  enum iproto_type stmt_type);
 
 /**
  * Finalize run writing by writing run index into file. The writer
@@ -636,6 +628,20 @@ vy_run_writer_commit(struct vy_run_writer *writer);
  */
 void
 vy_run_writer_abort(struct vy_run_writer *writer);
+
+/**
+ * Spread write iterator tuples into a specified writers. After
+ * call all writers are commited or aborted.
+ * @param wi Write iterator.
+ * @param writers Run writers array.
+ * @param count Length of @a writers.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory or disk error.
+ */
+int
+vy_run_write(struct vy_stmt_stream *wi, struct vy_run_writer *writers,
+	     int count);
 
 #if defined(__cplusplus)
 } /* extern "C" */

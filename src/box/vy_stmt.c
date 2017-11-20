@@ -514,27 +514,26 @@ vy_stmt_encode_primary(const struct tuple *value,
 }
 
 int
-vy_stmt_encode_secondary(const struct tuple *value,
+vy_stmt_encode_secondary(const struct tuple *value, enum iproto_type stmt_type,
 			 const struct key_def *cmp_def,
 			 struct xrow_header *xrow)
 {
 	memset(xrow, 0, sizeof(*xrow));
-	enum iproto_type type = vy_stmt_type(value);
-	xrow->type = type;
+	xrow->type = stmt_type;
 	xrow->lsn = vy_stmt_lsn(value);
 
 	struct request request;
 	memset(&request, 0, sizeof(request));
-	request.type = type;
+	request.type = stmt_type;
 	uint32_t size;
 	const char *extracted = tuple_extract_key(value, cmp_def, &size);
 	if (extracted == NULL)
 		return -1;
-	if (type == IPROTO_REPLACE) {
+	if (stmt_type == IPROTO_REPLACE) {
 		request.tuple = extracted;
 		request.tuple_end = extracted + size;
 	} else {
-		assert(type == IPROTO_DELETE);
+		assert(stmt_type == IPROTO_DELETE);
 		request.key = extracted;
 		request.key_end = extracted + size;
 	}

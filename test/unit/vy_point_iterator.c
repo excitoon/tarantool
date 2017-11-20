@@ -14,6 +14,47 @@
 
 uint64_t schema_version;
 
+static int
+vy_run_write_one(struct vy_run *run, const char *dirpath, uint32_t space_id,
+		 uint32_t iid, struct vy_stmt_stream *wi, uint64_t page_size,
+		 const struct key_def *cmp_def, const struct key_def *key_def,
+		 size_t max_output_count, double bloom_fpr)
+{
+	if (max_output_count == 0)
+		return 0;
+	struct vy_run_writer writer;
+	if (vy_run_writer_create(&writer, run, dirpath, space_id, iid,
+				 page_size, cmp_def, key_def, bloom_fpr,
+				 max_output_count) != 0)
+		return -1;
+
+	struct tuple *stmt = NULL;
+	if (wi->iface->start(wi) != 0)
+		goto error;
+	if (wi->iface->next(wi, &stmt) != 0)
+		goto error;
+	if (stmt == NULL)
+		return 0;
+	do {
+		if (vy_run_writer_append_stmt(&writer, stmt,
+					      vy_stmt_type(stmt)) != 0)
+			goto error;
+		if (wi->iface->next(wi, &stmt) != 0)
+			goto error;
+	} while (stmt != NULL);
+
+	int rc = vy_run_writer_commit(&writer);
+	wi->iface->stop(wi);
+	fiber_gc();
+	return rc;
+
+error:
+	vy_run_writer_abort(&writer);
+	wi->iface->stop(wi);
+	fiber_gc();
+	return -1;
+}
+
 static void
 test_basic()
 {

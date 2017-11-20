@@ -248,11 +248,19 @@ heap_less(heap_t *heap, struct heap_node *node1, struct heap_node *node2)
 		return lsn1 > lsn2;
 
 	/**
-	 * LSNs are equal. This may happen only during forced recovery.
-	 * Prioritize terminal (non-UPSERT) statements
+	 * LSNs are equal. This may happen
+	 * 1) during forced recovery;
+	 * 2) if a dirty REPLACE from a secondary index met with
+	 *    DELETE created during a pk dump or compaction. In
+	 *    such a case REPLACE must be skipped, because it was
+	 *    dirty and the DELETE came from pk dump/compaction.
 	 */
-	return (vy_stmt_type(src1->tuple) == IPROTO_UPSERT ? 1 : 0) <
-	       (vy_stmt_type(src2->tuple) == IPROTO_UPSERT ? 1 : 0);
+	int8_t type1 = vy_stmt_type(src1->tuple);
+	int8_t type2 = vy_stmt_type(src2->tuple);
+	if (type1 == IPROTO_DELETE && type2 == IPROTO_REPLACE)
+		return true;
+	return (type1 == IPROTO_UPSERT ? 1 : 0) <
+	       (type2 == IPROTO_UPSERT ? 1 : 0);
 
 }
 

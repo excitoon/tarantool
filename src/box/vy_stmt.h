@@ -607,6 +607,8 @@ vy_stmt_encode_primary(const struct tuple *value,
  * Encode vy_stmt for a secondary key as xrow_header
  *
  * @param value statement to encode
+ * @param stmt_type Type of @a value to encode. Can differ from
+ *        a real value's type for a secondary indexes.
  * @param key_def key definition
  * @param xrow[out] xrow to fill
  *
@@ -614,7 +616,7 @@ vy_stmt_encode_primary(const struct tuple *value,
  * @retval -1 if error
  */
 int
-vy_stmt_encode_secondary(const struct tuple *value,
+vy_stmt_encode_secondary(const struct tuple *value, enum iproto_type stmt_type,
 			 const struct key_def *cmp_def,
 			 struct xrow_header *xrow);
 

@@ -453,3 +453,27 @@ while wait_replace do fiber.sleep(0.01) end
 state, value = gen(param, state)
 value
 s:drop()
+
+--
+-- gh-2129: read-free REPLACEs and DELETEs for not unique
+-- secondary indexes.
+--
+s = box.schema.create_space('test', {engine = 'vinyl'})
+pk = s:create_index('pk')
+sk = s:create_index('sk', {parts = {2, 'unsigned'}, unique = false})
+
+-- Insert several REPLACEs, dump them and read an old version from
+-- a secondary index before DELETE for the old version is wrote
+-- to a delerun.
+s:replace{1, 2}
+s:replace{1, 3}
+s:replace{1, 4}
+errinj.set("ERRINJ_VY_RUN_WRITE_TIMEOUT", 1)
+box.snapshot()
+sk:select{3}
+sk:select{2}
+sk:select{}
+errinj.set("ERRINJ_VY_RUN_WRITE_TIMEOUT", 0)
+sk:select{}
+
+s:drop()

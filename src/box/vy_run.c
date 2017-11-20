@@ -42,6 +42,7 @@
 #include "tuple_hash.h" /* for bloom filter */
 #include "xlog.h"
 #include "xrow.h"
+#include "vy_write_iterator.h"
 
 static const uint64_t vy_page_info_key_map = (1 << VY_PAGE_INFO_OFFSET) |
 					     (1 << VY_PAGE_INFO_SIZE) |
@@ -1873,9 +1874,9 @@ fail:
 
 /* dump statement to the run page buffers (stmt header and data) */
 static int
-vy_run_dump_stmt(const struct tuple *value, struct xlog *data_xlog,
-		 struct vy_page_info *info, const struct key_def *key_def,
-		 bool is_primary)
+vy_run_dump_stmt(struct tuple *value, enum iproto_type stmt_type,
+		 struct xlog *data_xlog, struct vy_page_info *info,
+		 const struct key_def *key_def, bool is_primary)
 {
 	struct region *region = &fiber()->gc;
 	size_t used = region_used(region);
@@ -1883,7 +1884,7 @@ vy_run_dump_stmt(const struct tuple *value, struct xlog *data_xlog,
 	struct xrow_header xrow;
 	int rc = (is_primary ?
 		  vy_stmt_encode_primary(value, key_def, 0, &xrow) :
-		  vy_stmt_encode_secondary(value, key_def, &xrow));
+		  vy_stmt_encode_secondary(value, stmt_type, key_def, &xrow));
 	if (rc != 0)
 		return -1;
 
@@ -2272,12 +2273,14 @@ vy_run_writer_start_page(struct vy_run_writer *writer, struct tuple *first_stmt)
  * Write @a stmt into a current page.
  * @param writer Run writer.
  * @param stmt Statement to write.
+ * @param stmt_type Which type to use for a statement.
  *
  * @retval -1 Memory or IO error.
  * @retval  0 Success.
  */
 static inline int
-vy_run_writer_write_to_page(struct vy_run_writer *writer, struct tuple *stmt)
+vy_run_writer_write_to_page(struct vy_run_writer *writer, struct tuple *stmt,
+			    enum iproto_type stmt_type)
 {
 	if (writer->last_stmt != NULL)
 		vy_stmt_unref_if_possible(writer->last_stmt);
@@ -2293,8 +2296,8 @@ vy_run_writer_write_to_page(struct vy_run_writer *writer, struct tuple *stmt)
 		return -1;
 	}
 	*offset = page->unpacked_size;
-	if (vy_run_dump_stmt(stmt, &writer->data_xlog, page, writer->cmp_def,
-			     writer->iid == 0) != 0)
+	if (vy_run_dump_stmt(stmt, stmt_type, &writer->data_xlog, page,
+			     writer->cmp_def, writer->iid == 0) != 0)
 		return -1;
 
 	bloom_spectrum_add(&writer->bloom, tuple_hash(stmt, writer->key_def));
@@ -2347,7 +2350,8 @@ vy_run_writer_end_page(struct vy_run_writer *writer)
 }
 
 int
-vy_run_writer_append_stmt(struct vy_run_writer *writer, struct tuple *stmt)
+vy_run_writer_append_stmt(struct vy_run_writer *writer, struct tuple *stmt,
+			  enum iproto_type stmt_type)
 {
 	if (!xlog_is_open(&writer->data_xlog) &&
 	    vy_run_writer_create_xlog(writer) != 0)
@@ -2355,7 +2359,7 @@ vy_run_writer_append_stmt(struct vy_run_writer *writer, struct tuple *stmt)
 	if (writer->row_index_buf.buf == NULL &&
 	    vy_run_writer_start_page(writer, stmt) != 0)
 		return -1;
-	if (vy_run_writer_write_to_page(writer, stmt) != 0)
+	if (vy_run_writer_write_to_page(writer, stmt, stmt_type) != 0)
 		return -1;
 	if (obuf_size(&writer->data_xlog.obuf) >= writer->page_size)
 		return vy_run_writer_end_page(writer);
@@ -2423,51 +2427,310 @@ vy_run_writer_abort(struct vy_run_writer *writer)
 	vy_run_writer_destroy(writer, false);
 }
 
-int
-vy_run_write_one(struct vy_run *run, const char *dirpath, uint32_t space_id,
-		 uint32_t iid, struct vy_stmt_stream *wi, uint64_t page_size,
-		 const struct key_def *cmp_def, const struct key_def *key_def,
-		 size_t max_output_count, double bloom_fpr)
+/**
+ * Abort each run writer in @a writers array.
+ * @param writers Run writers array.
+ * @param count Length of @a writers.
+ */
+static inline void
+vy_run_writers_abort(struct vy_run_writer *writers, int count)
 {
-	ERROR_INJECT(ERRINJ_VY_RUN_WRITE,
-		     {diag_set(ClientError, ER_INJECTION,
-			       "vinyl dump"); return -1;});
+	for (int i = 0; i < count; ++i)
+		vy_run_writer_abort(&writers[i++]);
+}
 
+/**
+ * Commit each run writer in @a writers array. If in a middle of
+ * the array a commit has failed, rest of writers are aborted.
+ * @param writers Run writers array.
+ * @param count Length of @a writers.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory or disk error.
+ */
+static inline int
+vy_run_writers_commit(struct vy_run_writer *writers, int count)
+{
+	bool failed = false;
+	for (int i = 0; i < count; ++i) {
+		/*
+		 * Other writers had not failed and this iterator
+		 * has written at least one statement.
+		 */
+		if (! failed && writers[i].last_stmt != NULL) {
+			if (vy_run_writer_commit(&writers[i]) != 0)
+				failed = true;
+		} else {
+			vy_run_writer_abort(&writers[i]);
+		}
+	}
+	return failed ? -1 : 0;
+}
+
+/**
+ * Vy_run_tree is an in-memory structure to reorder statements,
+ * skipped by a primary indexe's write iterator, into an order of
+ * a secondary index. It is necessary to do before writing
+ * secondary indexe's run, because run's data must be sorted
+ * by indexe's cmp_def, but a primary indexe's write iterator
+ * returns tuples in a primary index order.
+ */
+
+static int
+vy_run_tree_cmp(const struct tuple *a, const struct tuple *b,
+		const struct key_def *cmp_def)
+{
+	int res = vy_tuple_compare(a, b, cmp_def);
+	if (res)
+		return res;
+	int64_t a_lsn = vy_stmt_lsn(a), b_lsn = vy_stmt_lsn(b);
+	return a_lsn > b_lsn ? -1 : a_lsn < b_lsn;
+}
+
+static int
+vy_run_tree_cmp_key(const struct tuple *a, void *key,
+		    const struct key_def *cmp_def)
+{
+	/* No search by keys. */
+	(void) a;
+	(void) key;
+	(void) cmp_def;
+	unreachable();
+	return -1;
+}
+
+#define VY_RUN_TREE_EXTENT_SIZE (16 * 1024)
+
+#define BPS_TREE_NAME vy_run_tree
+#define BPS_TREE_BLOCK_SIZE 512
+#define BPS_TREE_EXTENT_SIZE VY_RUN_TREE_EXTENT_SIZE
+#define BPS_TREE_COMPARE(a, b, cmp_def) vy_run_tree_cmp(a, b, cmp_def)
+#define BPS_TREE_COMPARE_KEY(a, b, cmp_def) vy_run_tree_cmp_key(a, b, cmp_def)
+#define bps_tree_elem_t struct tuple *
+#define bps_tree_key_t void *
+#define bps_tree_arg_t const struct key_def *
+#define BPS_TREE_NO_DEBUG
+
+#include <salad/bps_tree.h>
+
+#undef BPS_TREE_NAME
+#undef BPS_TREE_BLOCK_SIZE
+#undef BPS_TREE_EXTENT_SIZE
+#undef BPS_TREE_COMPARE
+#undef BPS_TREE_COMPARE_KEY
+#undef bps_tree_elem_t
+#undef bps_tree_key_t
+#undef bps_tree_arg_t
+#undef BPS_TREE_NO_DEBUG
+
+static void *
+vy_run_tree_extent_alloc(void *ctx)
+{
+	(void) ctx;
+	void *ret = region_alloc(&fiber()->gc, VY_RUN_TREE_EXTENT_SIZE);
+	if (ret == NULL)
+		diag_set(OutOfMemory, VY_RUN_TREE_EXTENT_SIZE, "region_alloc",
+			 "ret");
+	return ret;
+}
+
+static void
+vy_run_tree_extent_free(void *ctx, void *p)
+{
+	/* Can't free part of region allocated memory. */
+	(void)ctx;
+	(void)p;
+}
+
+/**
+ * Insert an array of tuples into specified trees.
+ * @param trees Array of trees.
+ * @param tree_count Length of @a trees.
+ * @param tuples Array of tuples.
+ * @param tuple_count Length of @a tuples.
+ * @param[out] is_needed_unref_tuples_in_trees Set to true, if
+ *             at least one tuple from @a tuples is refable. For
+ *             details @sa vy_run_write().
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory or disk error.
+ */
+static inline int
+vy_run_trees_insert_tuples(struct vy_run_tree *trees, int tree_count,
+			   struct tuple **tuples, int tuple_count,
+			   bool *is_needed_unref_tuples_in_trees)
+{
+	for (int i = 0; i < tuple_count; ++i) {
+		assert(vy_stmt_type(tuples[i]) == IPROTO_REPLACE);
+		if (vy_stmt_is_refable(tuples[i]))
+			*is_needed_unref_tuples_in_trees = true;
+		for (int j = 0; j < tree_count; ++j) {
+			struct tuple *replaced = NULL;
+			if (vy_run_tree_insert(&trees[j], tuples[i],
+					       &replaced) != 0)
+				return -1;
+			vy_stmt_ref_if_possible(tuples[i]);
+			assert(replaced == NULL);
+		}
+	}
+	return 0;
+}
+
+/**
+ * Dump trees into their writers.
+ * @param trees Array of trees.
+ * @param writers Array of writers.
+ * @param count Length of @a trees and @a writers.
+ * @param unref_tuples_in_trees True, if need to unref tuples
+ *        in trees. For details @sa vy_run_write().
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory or disk error.
+ */
+static inline int
+vy_run_trees_dump_into_runs(struct vy_run_tree *trees,
+			    struct vy_run_writer *writers, int count,
+			    bool unref_tuples_in_trees)
+{
+	/*
+	 * If this flag is true, then stop writing, only unref the
+	 * rest of tuples. We can not unref them out of this
+	 * cycle, if it is started, becase some previous tuples
+	 * already unreferenced and could be deleted.
+	 */
+	bool failed = false;
+	for (int i = 0; i < count; ++i) {
+		struct vy_run_writer *writer = &writers[i];
+		struct vy_run_tree *tree = &trees[i];
+		struct vy_run_tree_iterator it =
+			vy_run_tree_iterator_first(tree);
+		if (vy_run_tree_iterator_is_invalid(&it)) {
+			/* No skipped statements. */
+			return 0;
+		}
+		do {
+			struct tuple *s =
+				*vy_run_tree_iterator_get_elem(tree, &it);
+			/*
+			 * Can not temporary change statement type
+			 * to DELETE, because the statement can be
+			 * from vy_mem and can be accessed in tx
+			 * thread simultaneously.
+			 */
+			if (!failed &&
+			    vy_run_writer_append_stmt(writer, s,
+						      IPROTO_DELETE) != 0) {
+				if (unref_tuples_in_trees)
+					failed = true;
+				else
+					return -1;
+			}
+			vy_stmt_unref_if_possible(s);
+			vy_run_tree_iterator_next(tree, &it);
+		} while (! vy_run_tree_iterator_is_invalid(&it));
+	}
+	return failed ? -1 : 0;
+}
+
+int
+vy_run_write(struct vy_stmt_stream *wi, struct vy_run_writer *writers,
+	     int count)
+{
+	ERROR_INJECT(ERRINJ_VY_RUN_WRITE, {
+		diag_set(ClientError, ER_INJECTION, "vinyl dump");
+		return -1;
+	});
 	struct errinj *inj = errinj(ERRINJ_VY_RUN_WRITE_TIMEOUT, ERRINJ_DOUBLE);
 	if (inj != NULL && inj->dparam > 0)
 		usleep(inj->dparam * 1000000);
 
-	if (max_output_count == 0)
-		return 0;
-	struct vy_run_writer writer;
-	if (vy_run_writer_create(&writer, run, dirpath, space_id, iid,
-				 page_size, cmp_def, key_def, bloom_fpr,
-				 max_output_count) != 0)
-		return -1;
+	struct vy_run_tree *trees = NULL;
+	if (count > 1) {
+		int size = sizeof(*trees) * (count - 1);
+		trees = (struct vy_run_tree *) malloc(size);
+		if (trees == NULL) {
+			diag_set(OutOfMemory, size, "malloc", "trees");
+			return -1;
+		}
+		for (int i = 0; i < count - 1; ++i) {
+			vy_run_tree_create(&trees[i], writers[i + 1].cmp_def,
+					   vy_run_tree_extent_alloc,
+					   vy_run_tree_extent_free, NULL);
+		}
+	}
+	int rc = 0;
 	struct tuple *stmt = NULL;
 	if (wi->iface->start(wi) != 0)
 		goto error;
 	if (wi->iface->next(wi, &stmt) != 0)
 		goto error;
-	if (stmt == NULL)
-		return 0;
+	if (stmt == NULL) {
+		vy_run_writers_abort(writers, count);
+		goto done;
+	}
+	/*
+	 * If all skipped tuples are from vy_mems then they are
+	 * not referenced. And in a case of error trees can be
+	 * deleted with no fullscan for tuples unreferencing.
+	 */
+	bool unref_tuples_in_trees = false;
 	do {
-		if (vy_run_writer_append_stmt(&writer, stmt) != 0)
-			goto error;
+		if (vy_run_writer_append_stmt(&writers[0], stmt,
+					      vy_stmt_type(stmt)) != 0)
+			goto error_unref_skipped;
+
+		int skipped_count;
+		struct tuple **skipped =
+			vy_write_iterator_skipped_stmts(wi, &skipped_count);
+		/*
+		 * Use skipped REPLACEs as surrogate DELETEs for
+		 * secondary indexes.
+		 */
+		if (vy_run_trees_insert_tuples(trees, count - 1, skipped,
+					       skipped_count,
+					       &unref_tuples_in_trees) != 0)
+			goto error_unref_skipped;
+
 		if (wi->iface->next(wi, &stmt) != 0)
-			goto error;
+			goto error_unref_skipped;
 	} while (stmt != NULL);
 
-	int rc = vy_run_writer_commit(&writer);
+	/* Write sorted DELETEs into secondary runs. */
+	if (count > 1 &&
+	    vy_run_trees_dump_into_runs(trees, &writers[1], count - 1,
+					unref_tuples_in_trees) != 0)
+		goto error;
+
+	rc = vy_run_writers_commit(writers, count);
+done:
 	wi->iface->stop(wi);
+	for (int i = 0; i < count - 1; ++i)
+		vy_run_tree_destroy(&trees[i]);
+	free(trees);
 	fiber_gc();
 	return rc;
 
+error_unref_skipped:
+	if (unref_tuples_in_trees) {
+		for (int i = 0; i < count - 1; ++i) {
+			struct vy_run_tree *tree = &trees[i];
+			struct vy_run_tree_iterator it =
+				vy_run_tree_iterator_first(tree);
+			if (vy_run_tree_iterator_is_invalid(&it))
+				break;
+			do {
+				struct tuple *s =
+					*vy_run_tree_iterator_get_elem(tree,
+								       &it);
+				vy_stmt_unref_if_possible(s);
+				vy_run_tree_iterator_next(tree, &it);
+			} while (! vy_run_tree_iterator_is_invalid(&it));
+		}
+	}
 error:
-	vy_run_writer_abort(&writer);
-	wi->iface->stop(wi);
-	fiber_gc();
-	return -1;
+	vy_run_writers_abort(writers, count);
+	rc = -1;
+	goto done;
 }
 
 int

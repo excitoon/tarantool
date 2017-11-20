@@ -188,7 +188,19 @@ vy_read_iterator_cmp_with_current(struct vy_read_iterator *itr,
 	int cmp = iterator_direction(itr->iterator_type) *
 		  vy_tuple_compare(stmt, curr, itr->index->cmp_def);
 	*move_source_front = cmp <= 0;
-	return cmp;
+	if (cmp != 0)
+		return cmp;
+	int64_t lsn_stmt = vy_stmt_lsn(stmt);
+	int64_t lsn_curr = vy_stmt_lsn(curr);
+	if (lsn_stmt != lsn_curr)
+		return 0;
+	int8_t type_stmt = vy_stmt_type(stmt);
+	int8_t type_curr = vy_stmt_type(curr);
+	if (type_stmt == IPROTO_DELETE && type_curr == IPROTO_REPLACE)
+		return -1;
+	if (type_stmt == IPROTO_REPLACE && type_curr == IPROTO_DELETE)
+		return 1;
+	return 0;
 }
 
 /**

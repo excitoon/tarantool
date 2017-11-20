@@ -189,6 +189,12 @@ struct vy_index {
 	 * index.
 	 */
 	struct vy_index *next;
+	/**
+	 * True, if a space has secondary indexes, but all of them
+	 * are not unique. It allows read-free REPLACE and DELETE
+	 * operations on the space.
+	 */
+	bool are_secondary_indexes_not_unique;
 	/** Index statistics. */
 	struct vy_index_stat stat;
 	/**

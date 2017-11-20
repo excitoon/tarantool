@@ -1,0 +1,571 @@
+--
+-- gh-2129: This issue introduces a new type of a vinyl space
+-- with read-free REPLACE and DELETE. A vinyl space becames
+-- read-free, if it contains only not unique secondary indexes.
+-- In such a case garbage collection is deferred until primary
+-- index compaction or dump.
+--
+env = require('test_run')
+---
+...
+test_run = env.new()
+---
+...
+test_run:cmd("setopt delimiter ';'")
+---
+- true
+...
+function get_disk_stat(index)
+	local info = index:info()
+	local new = {}
+	new.run_count = info.run_count
+	new.disk_rows = info.disk.rows
+	new.disk_read_rows = info.disk.iterator.read.rows
+	return {new = new, get = get_disk_stat, index = index}
+end;
+---
+...
+function show_stat_update(stat)
+	stat.old = stat.new
+	stat.new = stat.get(stat.index).new
+	local ret = ''
+	for k, v in pairs(stat.new) do
+		local diff = stat.new[k] - stat.old[k]
+		if diff ~= 0 then
+			ret = ret..k..' change = '..diff..'; '
+		end
+	end
+	if ret == '' then
+		return 'no changes'
+	else
+		return ret
+	end
+end;
+---
+...
+function get_cache_stat(index)
+	local new = {}
+	local info = index:info()
+	new.cache_invalidated = info.cache.invalidate.rows
+	new.cache_size = info.cache.rows
+	new.cache_lookup = info.cache.lookup
+	return {new = new, get = get_cache_stat, index = index}
+end;
+---
+...
+function get_mem_stat(index)
+	local new = {}
+	local info = index:info()
+	new.mem_size = info.memory.rows
+	new.mem_lookup = info.memory.iterator.lookup
+	return {new = new, get = get_mem_stat, index = index}
+end;
+---
+...
+test_run:cmd("setopt delimiter ''");
+---
+- true
+...
+s = box.schema.create_space('test', {engine = 'vinyl'})
+---
+...
+pk = s:create_index('pk', {run_count_per_level = 100})
+---
+...
+sk = s:create_index('sk', {parts = {2, 'unsigned'}, unique = false, run_count_per_level = 100})
+---
+...
+sk_disk_stat = get_disk_stat(sk)
+---
+...
+pk_disk_stat = get_disk_stat(pk)
+---
+...
+s:replace{1, 20}
+---
+- [1, 20]
+...
+s:replace{1, 30}
+---
+- [1, 30]
+...
+s:replace{1, 60}
+---
+- [1, 60]
+...
+s:replace{1, 50}
+---
+- [1, 50]
+...
+s:replace{1, 40}
+---
+- [1, 40]
+...
+show_stat_update(sk_disk_stat)
+---
+- no changes
+...
+show_stat_update(pk_disk_stat)
+---
+- no changes
+...
+sk:select{50}
+---
+- []
+...
+sk:select{40}
+---
+- - [1, 40]
+...
+box.snapshot()
+---
+- ok
+...
+-- Sk contains 5 replaces in a one run and 4 deletes in another.
+show_stat_update(sk_disk_stat)
+---
+- 'run_count change = 2; disk_rows change = 9; '
+...
+show_stat_update(pk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 1; '
+...
+s:select{}
+---
+- - [1, 40]
+...
+sk:select{20}
+---
+- []
+...
+sk:select{30}
+---
+- []
+...
+sk:select{60}
+---
+- []
+...
+sk:select{50}
+---
+- []
+...
+sk:select{40}
+---
+- - [1, 40]
+...
+show_stat_update(sk_disk_stat)
+---
+- 'disk_read_rows change = 45; '
+...
+show_stat_update(pk_disk_stat)
+---
+- 'disk_read_rows change = 1; '
+...
+--
+-- Ensure a secondary index cache do not return dirty tuples.
+--
+s:replace{2, 20}
+---
+- [2, 20]
+...
+s:replace{2, 30}
+---
+- [2, 30]
+...
+sk:select{30}
+---
+- - [2, 30]
+...
+s:replace{2, 40}
+---
+- [2, 40]
+...
+sk:select{30} -- Must not be found.
+---
+- []
+...
+sk:select{40} -- Found.
+---
+- - [1, 40]
+  - [2, 40]
+...
+--
+-- Check DELETE to be read-free.
+--
+pk:delete{1}
+---
+...
+sk:select{40} -- Must return only {2, 40}.
+---
+- - [2, 40]
+...
+--
+-- Check optimized update works correctly.
+--
+s:replace{3, 10}
+---
+- [3, 10]
+...
+s:replace{3, 20}
+---
+- [3, 20]
+...
+s:update({3}, {{'!', 3, 300}}) -- Optimized update.
+---
+- [3, 20, 300]
+...
+s:select{3}
+---
+- - [3, 20, 300]
+...
+sk:select{10}
+---
+- []
+...
+sk:select{20}
+---
+- - [3, 20, 300]
+...
+--
+-- Check that dirty statements are deleted on lookup from a cache
+-- sequence of a secondary index.
+--
+cache_stat = get_cache_stat(sk)
+---
+...
+s:replace{4, 1}
+---
+- [4, 1]
+...
+s:replace{5, 2}
+---
+- [5, 2]
+...
+s:replace{6, 3}
+---
+- [6, 3]
+...
+s:replace{7, 4}
+---
+- [7, 4]
+...
+s:replace{8, 5}
+---
+- [8, 5]
+...
+s:replace{9, 5}
+---
+- [9, 5]
+...
+s:replace{10, 4}
+---
+- [10, 4]
+...
+s:replace{11, 3}
+---
+- [11, 3]
+...
+s:replace{12, 6}
+---
+- [12, 6]
+...
+show_stat_update(cache_stat)
+---
+- no changes
+...
+sk:select{}
+---
+- - [4, 1]
+  - [5, 2]
+  - [6, 3]
+  - [11, 3]
+  - [7, 4]
+  - [10, 4]
+  - [8, 5]
+  - [9, 5]
+  - [12, 6]
+  - [3, 20, 300]
+  - [2, 40]
+...
+show_stat_update(cache_stat)
+---
+- 'cache_invalidated change = 2; cache_lookup change = 12; cache_size change = 7; '
+...
+mem_stat = get_mem_stat(sk)
+---
+...
+s:replace{6, 30}
+---
+- [6, 30]
+...
+s:replace{9, 50}
+---
+- [9, 50]
+...
+s:replace{11, 30}
+---
+- [11, 30]
+...
+show_stat_update(mem_stat)
+---
+- 'mem_size change = 3; '
+...
+sk:select{}
+---
+- - [4, 1]
+  - [5, 2]
+  - [7, 4]
+  - [10, 4]
+  - [8, 5]
+  - [12, 6]
+  - [3, 20, 300]
+  - [6, 30]
+  - [11, 30]
+  - [2, 40]
+  - [9, 50]
+...
+show_stat_update(cache_stat)
+---
+- 'cache_invalidated change = 3; cache_lookup change = 6; '
+...
+s:drop()
+---
+...
+--
+-- Test deleruns generation and compaction.
+--
+s = box.schema.create_space('test', {engine = 'vinyl'})
+---
+...
+pk = s:create_index('pk', {run_count_per_level = 2})
+---
+...
+sk = s:create_index('sk', {unique = false, parts = {2, 'unsigned'}, run_count_per_level = 2})
+---
+...
+s:replace{5, 1}
+---
+- [5, 1]
+...
+s:replace{5, 2}
+---
+- [5, 2]
+...
+s:replace{5, 3}
+---
+- [5, 3]
+...
+s:replace{5, 6}
+---
+- [5, 6]
+...
+s:replace{5, 5}
+---
+- [5, 5]
+...
+s:replace{5, 4}
+---
+- [5, 4]
+...
+s:replace{6, 7}
+---
+- [6, 7]
+...
+s:replace{6, 8}
+---
+- [6, 8]
+...
+pk_mem_stat = get_mem_stat(pk)
+---
+...
+sk_mem_stat = get_mem_stat(sk)
+---
+...
+pk_disk_stat = get_disk_stat(pk)
+---
+...
+sk_disk_stat = get_disk_stat(sk)
+---
+...
+box.snapshot()
+---
+- ok
+...
+-- Primary has one dumped run and no mems.
+show_stat_update(pk_mem_stat)
+---
+- 'mem_size change = -8; '
+...
+-- Secondary has two runs: one dumped and one is delerun from pk.
+-- Mem is empty too.
+show_stat_update(sk_mem_stat)
+---
+- 'mem_size change = -8; '
+...
+show_stat_update(pk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 2; '
+...
+-- 14 disk tuples = 8 replaces + 6 deletes of old versions.
+show_stat_update(sk_disk_stat)
+---
+- 'run_count change = 2; disk_rows change = 14; '
+...
+-- No old versions skipping.
+s:delete{6}
+---
+...
+s:replace{6, 9}
+---
+- [6, 9]
+...
+s:replace{7, 10}
+---
+- [7, 10]
+...
+-- 2 tuples in sk mem: delete is wrote in pk only.
+show_stat_update(sk_mem_stat)
+---
+- 'mem_size change = 2; '
+...
+show_stat_update(pk_mem_stat)
+---
+- 'mem_size change = 3; '
+...
+box.snapshot()
+---
+- ok
+...
+show_stat_update(sk_mem_stat)
+---
+- 'mem_size change = -2; '
+...
+show_stat_update(sk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 2; '
+...
+show_stat_update(pk_mem_stat)
+---
+- 'mem_size change = -3; '
+...
+show_stat_update(pk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 2; '
+...
+s:replace{8, 11}
+---
+- [8, 11]
+...
+s:replace{8, 12}
+---
+- [8, 12]
+...
+box.snapshot()
+---
+- ok
+...
+show_stat_update(sk_mem_stat)
+---
+- no changes
+...
+show_stat_update(sk_disk_stat)
+---
+- 'run_count change = 2; disk_rows change = 3; '
+...
+show_stat_update(pk_mem_stat)
+---
+- no changes
+...
+show_stat_update(pk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 1; '
+...
+sk:info().run_count
+---
+- 5
+...
+s:replace{8, 11}
+---
+- [8, 11]
+...
+s:replace{8, 12}
+---
+- [8, 12]
+...
+box.snapshot()
+---
+- ok
+...
+show_stat_update(sk_mem_stat)
+---
+- no changes
+...
+show_stat_update(sk_disk_stat)
+---
+- 'run_count change = -3; disk_rows change = -12; '
+...
+show_stat_update(pk_mem_stat)
+---
+- no changes
+...
+show_stat_update(pk_disk_stat)
+---
+- 'run_count change = 1; disk_rows change = 1; '
+...
+sk_disk_stat.new
+---
+- run_count: 2
+  disk_rows: 7
+  disk_read_rows: 0
+...
+pk_disk_stat.new
+---
+- run_count: 4
+  disk_rows: 6
+  disk_read_rows: 0
+...
+sk:select{}
+---
+- - [5, 4]
+  - [6, 9]
+  - [7, 10]
+  - [8, 12]
+...
+--
+-- Check deletion of an old verion from a write set of a secondary
+-- index.
+--
+box.begin()
+---
+...
+s:replace{9, 100}
+---
+- [9, 100]
+...
+s:replace{9, 101}
+---
+- [9, 101]
+...
+pk:select{9}
+---
+- - [9, 101]
+...
+sk:select{9}
+---
+- - [6, 9]
+...
+box.commit()
+---
+...
+pk:select{9}
+---
+- - [9, 101]
+...
+sk:select{9}
+---
+- - [6, 9]
+...
+s:drop()
+---
+...
