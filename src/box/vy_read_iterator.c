@@ -154,27 +154,41 @@ vy_read_iterator_range_is_done(struct vy_read_iterator *itr)
 }
 
 /**
- * Compare two tuples from the read iterator perspective.
- *
- * Returns:
- *  -1 if statement @a precedes statement @b in the iterator output
- *   0 if statements @a and @b are at the same position
- *   1 if statement @a supersedes statement @b
- *
- * NULL denotes the statement following the last one.
+ * Compare current and a given tuples from the read iterator
+ * perspective. NULL denotes the statement following the last one.
+ * @param itr Read iterator.
+ * @param stmt Statement (from source).
+ * @param[out] move_source_front Becames true, if a source, owning
+ *             @a stmt must update its front_it to the current
+ *             value.
+ * @retval -1 If a given statement precedes a current one in the
+ *            iterator output.
+ * @retval  0 If a given statement and a current one are at the
+ *            same position.
+ * @retval  1 If a given statement supersedes a current one.
  */
 static inline int
-vy_read_iterator_cmp_stmt(struct vy_read_iterator *itr,
-			  const struct tuple *a, const struct tuple *b)
+vy_read_iterator_cmp_with_current(struct vy_read_iterator *itr,
+				  const struct tuple *stmt,
+				  bool *move_source_front)
 {
-	if (a == NULL && b != NULL)
+	struct tuple *curr = itr->curr_stmt;
+	if (stmt == NULL && curr != NULL) {
+		*move_source_front = false;
 		return 1;
-	if (a != NULL && b == NULL)
+	}
+	if (stmt != NULL && curr == NULL) {
+		*move_source_front = true;
 		return -1;
-	if (a == NULL && b == NULL)
+	}
+	if (stmt == NULL && curr == NULL) {
+		*move_source_front = true;
 		return 0;
-	return iterator_direction(itr->iterator_type) *
-		vy_tuple_compare(a, b, itr->index->cmp_def);
+	}
+	int cmp = iterator_direction(itr->iterator_type) *
+		  vy_tuple_compare(stmt, curr, itr->index->cmp_def);
+	*move_source_front = cmp <= 0;
+	return cmp;
 }
 
 /**
@@ -214,6 +228,7 @@ vy_read_iterator_evaluate_src(struct vy_read_iterator *itr,
 {
 	int cmp;
 	uint32_t src_id = src - itr->src;
+	bool move_front = false;
 
 	if (vy_read_iterator_is_exact_match(itr, src->stmt)) {
 		/*
@@ -223,13 +238,14 @@ vy_read_iterator_evaluate_src(struct vy_read_iterator *itr,
 		 * exact match as well and so we would not have
 		 * scanned this source at all.
 		 */
-		assert(vy_read_iterator_cmp_stmt(itr, src->stmt,
-						 itr->curr_stmt) < 0);
+		assert(vy_read_iterator_cmp_with_current(itr, src->stmt,
+							 &move_front) < 0);
+		assert(move_front == true);
 		cmp = -1;
 		*stop = true;
 	} else {
-		cmp = vy_read_iterator_cmp_stmt(itr, src->stmt,
-						itr->curr_stmt);
+		cmp = vy_read_iterator_cmp_with_current(itr, src->stmt,
+							&move_front);
 	}
 	if (cmp < 0) {
 		assert(src->stmt != NULL);
@@ -240,7 +256,7 @@ vy_read_iterator_evaluate_src(struct vy_read_iterator *itr,
 		itr->curr_src = src_id;
 		itr->front_id++;
 	}
-	if (cmp <= 0)
+	if (move_front)
 		src->front_id = itr->front_id;
 	if (*stop || src_id >= itr->skipped_src)
 		itr->skipped_src = src_id + 1;
@@ -382,6 +398,7 @@ vy_read_iterator_restore_mem(struct vy_read_iterator *itr)
 	int rc;
 	int cmp;
 	struct vy_read_src *src = &itr->src[itr->mem_src];
+	bool move_front;
 
 	rc = vy_mem_iterator_restore(&src->mem_iterator,
 				     itr->last_stmt, &src->stmt);
@@ -390,7 +407,7 @@ vy_read_iterator_restore_mem(struct vy_read_iterator *itr)
 	if (rc == 0)
 		return 0; /* nothing changed */
 
-	cmp = vy_read_iterator_cmp_stmt(itr, src->stmt, itr->curr_stmt);
+	cmp = vy_read_iterator_cmp_with_current(itr, src->stmt, &move_front);
 	if (cmp > 0) {
 		/*
 		 * Memory trees are append-only so if the
@@ -400,6 +417,7 @@ vy_read_iterator_restore_mem(struct vy_read_iterator *itr)
 		assert(src->front_id < itr->front_id);
 		return 0;
 	}
+	assert(move_front == true);
 	if (cmp < 0 || vy_stmt_lsn(src->stmt) > vy_stmt_lsn(itr->curr_stmt)) {
 		/*
 		 * The new statement precedes the current
@@ -529,9 +547,13 @@ rescan_disk:
 		goto rescan_disk;
 	}
 done:
-	if (itr->last_stmt != NULL && itr->curr_stmt != NULL)
-	       assert(vy_read_iterator_cmp_stmt(itr, itr->curr_stmt,
-						itr->last_stmt) > 0);
+	if (itr->last_stmt != NULL && itr->curr_stmt != NULL) {
+		bool move_front;
+		(void) move_front;
+		assert(vy_read_iterator_cmp_with_current(itr, itr->last_stmt,
+							 &move_front) < 0);
+		assert(move_front == true);
+	}
 
 	if (itr->need_check_eq && itr->curr_stmt != NULL &&
 	    vy_tuple_compare_with_key(itr->curr_stmt, itr->key,
