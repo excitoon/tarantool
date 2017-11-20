@@ -637,18 +637,177 @@ vy_task_execute(struct vy_task *task)
 				task->max_output_count, task->bloom_fpr);
 }
 
+/** Array of slices, restricted with begin and end. */
+struct vy_slice_array {
+	/** Slice array borders. */
+	struct vy_range *begin;
+	struct vy_range *end;
+	/** Slice array, terminated by NULL. */
+	struct vy_slice *slices[0];
+};
+
+/**
+ * Delete slices in an array and the array itself.
+ * @param slice_array Slice array to delete.
+ * @param[in][out] loops Iterations count for periodic yield.
+ */
+static inline void
+vy_slice_array_delete(struct vy_slice_array *slice_array, int *loops)
+{
+	struct vy_slice **slice = slice_array->slices;
+	while (*slice != NULL) {
+		vy_slice_delete(*slice);
+		if (loops != NULL && ++*loops % VY_YIELD_LOOPS == 0)
+			fiber_sleep(0);
+		++slice;
+	}
+	free(slice_array);
+}
+
+/**
+ * Create a new slice array from a specified run.
+ * @param index Index owning @a run.
+ * @param run Run to cut into slices.
+ * @param[in][out] loops Iterations count for periodic yield.
+ *
+ * @retval not NULL Slice array.
+ * @retval     NULL Memory error.
+ */
+static struct vy_slice_array *
+vy_slice_array_new(struct vy_index *index, struct vy_run *run, int *loops)
+{
+	struct tuple_format *key_format = index->env->key_format;
+	assert(! vy_run_is_empty(run));
+	int size = sizeof(struct vy_slice_array) +
+		   sizeof(struct vy_slice *) * index->range_count;
+	struct vy_slice_array *slice_array =
+		(struct vy_slice_array *) calloc(1, size);
+	if (slice_array == NULL) {
+		diag_set(OutOfMemory, size, "malloc", "slice_array");
+		return NULL;
+	}
+	/*
+	 * Figure out which ranges intersect the new run.
+	 * @begin_range is the first range intersecting the run.
+	 * @end_range is the range following the last range
+	 * intersecting the run or NULL if the run itersects all
+	 * ranges.
+	 */
+	struct tuple *min =
+	vy_key_from_msgpack(key_format, run->info.min_key);
+	if (min == NULL) {
+		free(slice_array);
+		return NULL;
+	}
+	struct tuple *max =
+		vy_key_from_msgpack(key_format, run->info.max_key);
+	if (max == NULL) {
+		tuple_unref(min);
+		free(slice_array);
+		return NULL;
+	}
+	struct vy_range *begin_range = vy_range_tree_psearch(index->tree, min);
+	struct vy_range *end_range = vy_range_tree_nsearch(index->tree, max);
+	tuple_unref(min);
+	tuple_unref(max);
+	int i = 0;
+	for (struct vy_range *range = begin_range; range != end_range;
+	     range = vy_range_tree_next(index->tree, range), ++i) {
+		assert(i < index->range_count);
+		slice_array->slices[i] = vy_slice_new(vy_log_next_id(), run,
+						      range->begin, range->end,
+						      index->cmp_def);
+		if (slice_array->slices[i] == NULL) {
+			vy_slice_array_delete(slice_array, loops);
+			return NULL;
+		}
+		/*
+		 * It's OK to yield here for the range tree can only
+		 * be changed from the scheduler fiber.
+		 */
+		if (loops != NULL && ++*loops % VY_YIELD_LOOPS == 0)
+			fiber_sleep(0);
+	}
+	slice_array->begin = begin_range;
+	slice_array->end = end_range;
+	return slice_array;
+}
+
+/**
+ * Log creation of run and its slices into vylog.
+ * @param slice_array Slice array.
+ * @param run_id Run identifier.
+ * @param dump_lsn Newest LSN on a disk of @a index.
+ * @param index Index owning a run with @a run_id.
+ * @param[in][out] loops Iterations count for periodic yield.
+ */
+static inline void
+vy_slice_array_log(struct vy_slice_array *slice_array, int64_t run_id,
+		   int64_t dump_lsn, struct vy_index *index, int *loops)
+{
+	vy_log_create_run(index->commit_lsn, run_id, dump_lsn);
+	int i = 0;
+	for (struct vy_range *range = slice_array->begin;
+	     range != slice_array->end;
+	     range = vy_range_tree_next(index->tree, range), ++i) {
+		assert(i < index->range_count);
+		struct vy_slice *slice = slice_array->slices[i];
+		vy_log_insert_slice(range->id, run_id, slice->id,
+				    tuple_data_or_null(slice->begin),
+				    tuple_data_or_null(slice->end));
+		/* See comment in vy_slice_array_new(). */
+		if (loops != NULL && ++*loops % VY_YIELD_LOOPS == 0)
+			fiber_sleep(0);
+	}
+}
+
+/**
+ * Spread a slices into ranges.
+ * @param slice_array Slice array.
+ * @param index Index into those ranges @a slice array to spread.
+ * @param[in][out] loops Iterations count for periodic yield.
+ */
+static inline void
+vy_slice_array_spread_on_ranges(struct vy_slice_array *slice_array,
+				struct vy_index *index, int *loops)
+{
+	int i = 0;
+	for (struct vy_range *range = slice_array->begin;
+	     range != slice_array->end;
+	     range = vy_range_tree_next(index->tree, range), ++i) {
+		assert(i < index->range_count);
+		struct vy_slice *slice = slice_array->slices[i];
+		vy_index_unacct_range(index, range);
+		vy_range_add_slice(range, slice);
+		vy_index_acct_range(index, range);
+		vy_range_update_compact_priority(range, &index->opts);
+		if (!vy_range_is_scheduled(range)) {
+			vy_range_heap_update(&index->range_heap,
+					     &range->heap_node);
+		}
+		range->version++;
+		/*
+		 * If we yield here, a concurrent fiber will see
+		 * a range with a run slice containing statements
+		 * present in the in-memory trees of the index.
+		 * This is OK, because read iterator won't use the
+		 * new run slice until index->dump_lsn is bumped,
+		 * which is only done after in-memory trees are
+		 * removed (see vy_read_iterator_add_disk()).
+		 */
+		if (loops != NULL && ++*loops % VY_YIELD_LOOPS == 0)
+			fiber_sleep(0);
+	}
+}
+
 static int
 vy_task_dump_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 {
 	struct vy_index *index = task->index;
 	struct vy_run *new_run = task->new_run;
 	int64_t dump_lsn = new_run->dump_lsn;
-	struct tuple_format *key_format = index->env->key_format;
 	struct vy_mem *mem, *next_mem;
-	struct vy_slice **new_slices, *slice;
-	struct vy_range *range, *begin_range, *end_range;
-	struct tuple *min_key, *max_key;
-	int i, loops = 0;
+	int loops = 0;
 
 	assert(index->is_dumping);
 
@@ -662,79 +821,24 @@ vy_task_dump_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 		vy_log_tx_begin();
 		vy_log_dump_index(index->commit_lsn, dump_lsn);
 		if (vy_log_tx_commit() < 0)
-			goto fail;
+			return -1;
 		vy_run_discard(new_run);
 		goto delete_mems;
 	}
-
-	assert(new_run->info.min_lsn > index->dump_lsn);
-	assert(new_run->info.max_lsn <= dump_lsn);
-
-	/*
-	 * Figure out which ranges intersect the new run.
-	 * @begin_range is the first range intersecting the run.
-	 * @end_range is the range following the last range
-	 * intersecting the run or NULL if the run itersects all
-	 * ranges.
-	 */
-	min_key = vy_key_from_msgpack(key_format, new_run->info.min_key);
-	if (min_key == NULL)
-		goto fail;
-	max_key = vy_key_from_msgpack(key_format, new_run->info.max_key);
-	if (max_key == NULL) {
-		tuple_unref(min_key);
-		goto fail;
-	}
-	begin_range = vy_range_tree_psearch(index->tree, min_key);
-	end_range = vy_range_tree_nsearch(index->tree, max_key);
-	tuple_unref(min_key);
-	tuple_unref(max_key);
-
-	/*
-	 * For each intersected range allocate a slice of the new run.
-	 */
-	new_slices = calloc(index->range_count, sizeof(*new_slices));
-	if (new_slices == NULL) {
-		diag_set(OutOfMemory, index->range_count * sizeof(*new_slices),
-			 "malloc", "struct vy_slice *");
-		goto fail;
-	}
-	for (range = begin_range, i = 0; range != end_range;
-	     range = vy_range_tree_next(index->tree, range), i++) {
-		slice = vy_slice_new(vy_log_next_id(), new_run,
-				     range->begin, range->end, index->cmp_def);
-		if (slice == NULL)
-			goto fail_free_slices;
-
-		assert(i < index->range_count);
-		new_slices[i] = slice;
-		/*
-		 * It's OK to yield here for the range tree can only
-		 * be changed from the scheduler fiber.
-		 */
-		if (++loops % VY_YIELD_LOOPS == 0)
-			fiber_sleep(0);
-	}
-
+	struct vy_slice_array *slice_array =
+		vy_slice_array_new(index, new_run, &loops);
+	if (slice_array == NULL)
+		return -1;
 	/*
 	 * Log change in metadata.
 	 */
 	vy_log_tx_begin();
-	vy_log_create_run(index->commit_lsn, new_run->id, dump_lsn);
-	for (range = begin_range, i = 0; range != end_range;
-	     range = vy_range_tree_next(index->tree, range), i++) {
-		assert(i < index->range_count);
-		slice = new_slices[i];
-		vy_log_insert_slice(range->id, new_run->id, slice->id,
-				    tuple_data_or_null(slice->begin),
-				    tuple_data_or_null(slice->end));
-
-		if (++loops % VY_YIELD_LOOPS == 0)
-			fiber_sleep(0); /* see comment above */
-	}
+	vy_slice_array_log(slice_array, new_run->id, dump_lsn, index, &loops);
 	vy_log_dump_index(index->commit_lsn, dump_lsn);
-	if (vy_log_tx_commit() < 0)
-		goto fail_free_slices;
+	if (vy_log_tx_commit() < 0) {
+		vy_slice_array_delete(slice_array, &loops);
+		return -1;
+	}
 
 	/*
 	 * Account the new run.
@@ -748,31 +852,8 @@ vy_task_dump_complete(struct vy_scheduler *scheduler, struct vy_task *task)
 	/*
 	 * Add new slices to ranges.
 	 */
-	for (range = begin_range, i = 0; range != end_range;
-	     range = vy_range_tree_next(index->tree, range), i++) {
-		assert(i < index->range_count);
-		slice = new_slices[i];
-		vy_index_unacct_range(index, range);
-		vy_range_add_slice(range, slice);
-		vy_index_acct_range(index, range);
-		vy_range_update_compact_priority(range, &index->opts);
-		if (!vy_range_is_scheduled(range))
-			vy_range_heap_update(&index->range_heap,
-					     &range->heap_node);
-		range->version++;
-		/*
-		 * If we yield here, a concurrent fiber will see
-		 * a range with a run slice containing statements
-		 * present in the in-memory trees of the index.
-		 * This is OK, because read iterator won't use the
-		 * new run slice until index->dump_lsn is bumped,
-		 * which is only done after in-memory trees are
-		 * removed (see vy_read_iterator_add_disk()).
-		 */
-		if (++loops % VY_YIELD_LOOPS == 0)
-			fiber_sleep(0);
-	}
-	free(new_slices);
+	vy_slice_array_spread_on_ranges(slice_array, index, &loops);
+	free(slice_array);
 
 delete_mems:
 	/*
@@ -803,18 +884,6 @@ delete_mems:
 
 	say_info("%s: dump completed", vy_index_name(index));
 	return 0;
-
-fail_free_slices:
-	for (i = 0; i < index->range_count; i++) {
-		slice = new_slices[i];
-		if (slice != NULL)
-			vy_slice_delete(slice);
-		if (++loops % VY_YIELD_LOOPS == 0)
-			fiber_sleep(0);
-	}
-	free(new_slices);
-fail:
-	return -1;
 }
 
 static void
@@ -1239,7 +1308,7 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 
 	say_info("%s: started compacting range %s, runs %d/%d",
 		 vy_index_name(index), vy_range_str(range),
-                 range->compact_priority, range->slice_count);
+		 range->compact_priority, range->slice_count);
 	*p_task = task;
 	return 0;
 
