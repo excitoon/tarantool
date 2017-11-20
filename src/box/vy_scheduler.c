@@ -627,7 +627,7 @@ vy_run_discard(struct vy_run *run)
 }
 
 static int
-vy_task_dump_execute(struct vy_task *task)
+vy_task_execute(struct vy_task *task)
 {
 	struct vy_index *index = task->index;
 
@@ -876,7 +876,7 @@ vy_task_dump_new(struct vy_scheduler *scheduler, struct vy_index *index,
 		 struct vy_task **p_task)
 {
 	static struct vy_task_ops dump_ops = {
-		.execute = vy_task_dump_execute,
+		.execute = vy_task_execute,
 		.complete = vy_task_dump_complete,
 		.abort = vy_task_dump_abort,
 	};
@@ -992,17 +992,6 @@ err:
 	say_error("%s: could not start dump: %s", vy_index_name(index),
 		  diag_last_error(diag_get())->errmsg);
 	return -1;
-}
-
-static int
-vy_task_compact_execute(struct vy_task *task)
-{
-	struct vy_index *index = task->index;
-
-	return vy_run_write_one(task->new_run, index->env->path,
-				index->space_id, index->id, task->wi,
-				task->page_size, index->cmp_def, index->key_def,
-				task->max_output_count, task->bloom_fpr);
 }
 
 static int
@@ -1173,7 +1162,7 @@ vy_task_compact_new(struct vy_scheduler *scheduler, struct vy_index *index,
 		    struct vy_task **p_task)
 {
 	static struct vy_task_ops compact_ops = {
-		.execute = vy_task_compact_execute,
+		.execute = vy_task_execute,
 		.complete = vy_task_compact_complete,
 		.abort = vy_task_compact_abort,
 	};
