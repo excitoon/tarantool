@@ -195,10 +195,20 @@ stailq_splice(struct stailq *head1, struct stailq_entry *elem,
 #define stailq_next_entry(item, member)					\
 	stailq_entry(stailq_next(&(item)->member), typeof(*item), member)
 
-#define stailq_foreach_entry(item, head, member)			\
-	for (item = stailq_first_entry((head), typeof(*item), member);	\
+/**
+ * Iterate from a specified stailq_entry to the end of the list.
+ */
+#define stailq_entry_foreach(item, first_entry, member)			\
+	for (item = stailq_entry(first_entry,  typeof(*item), member);	\
 	     item != stailq_entry(0, typeof(*item), member);		\
 	     item = stailq_next_entry(item, member))
+
+/**
+ * Iterate from the first entry of a stailq to the end of the
+ * list.
+ */
+#define stailq_foreach_entry(item, head, member)			\
+	stailq_entry_foreach(item, stailq_first(head), member)
 
 #define stailq_foreach_entry_safe(item, next, head, member)		\
 	for (item = stailq_first_entry((head), typeof(*item), member);	\
