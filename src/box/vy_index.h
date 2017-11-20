@@ -183,6 +183,12 @@ struct vy_index {
 	 * is primary. Referenced by each secondary index.
 	 */
 	struct vy_index *pk;
+	/**
+	 * Link to the next index of the same space. Indexes of
+	 * the space form a forward list, starting from a primary
+	 * index.
+	 */
+	struct vy_index *next;
 	/** Index statistics. */
 	struct vy_index_stat stat;
 	/**

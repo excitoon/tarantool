@@ -1102,8 +1102,17 @@ vinyl_space_commit_alter(struct space *old_space, struct space *new_space)
 	tuple_format_ref(new_format);
 	vy_index_validate_formats(pk);
 
+	/* Recreate forward list. */
+	pk->next = NULL;
+	struct vy_index *prev = pk;
+
 	for (uint32_t i = 1; i < new_space->index_count; ++i) {
 		struct vy_index *index = vy_index(new_space->index[i]);
+		/* Recreate forward list. */
+		prev->next = index;
+		prev = index;
+		index->next = NULL;
+
 		vy_index_unref(index->pk);
 		vy_index_ref(pk);
 		index->pk = pk;
