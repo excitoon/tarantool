@@ -1627,6 +1627,32 @@ vy_index_full_by_stmt(struct vy_env *env, struct vy_tx *tx,
 }
 
 /**
+ * Lookup a next full tuple in a primary index using iterator over
+ * a secondary index.
+ * @param itr Read iterator over a secondary index.
+ * @param env Vinyl environment.
+ * @param[out] ret Tuple from a primary index. Must be
+ *             unreferenced after usage.
+ *
+ * @retval -1 Memory or disk error.
+ * @retval  0 Success.
+ */
+static inline int
+vy_read_iterator_next_full(struct vy_read_iterator *itr, struct vy_env *env,
+			   struct tuple **ret)
+{
+	assert(itr->index->id != 0);
+	*ret = NULL;
+	struct tuple *sk_tuple;
+	if (vy_read_iterator_next(itr, &sk_tuple) != 0)
+		return -1;
+	vy_read_iterator_cache_last(itr);
+	if (sk_tuple == NULL)
+		return 0;
+	return vy_index_full_by_stmt(env, itr->tx, itr->index, sk_tuple, ret);
+}
+
+/**
  * Find a tuple in the primary index by the key of the specified
  * index.
  * @param env         Vinyl environment.
@@ -1660,22 +1686,19 @@ vy_index_full_by_key(struct vy_env *env, struct vy_tx *tx,
 		p_read_view = &env->xm->p_global_read_view;
 
 	struct vy_read_iterator itr;
-	struct tuple *found;
 	vy_read_iterator_open(&itr, &env->run_env, index, tx, ITER_EQ, vykey,
 			      p_read_view, env->too_long_threshold);
-	int rc = vy_read_iterator_next(&itr, &found);
-	if (rc != 0)
-		goto done;
-	if (index->id == 0 || found == NULL) {
-		*result = found;
-		if (found != NULL)
-			tuple_ref(found);
+	int rc;
+	if (index->id == 0) {
+		rc = vy_read_iterator_next(&itr, result);
+		if (rc != 0)
+			goto done;
 		vy_read_iterator_cache_last(&itr);
-		goto done;
+		if (*result != NULL)
+			tuple_ref(*result);
+	} else {
+		rc = vy_read_iterator_next_full(&itr, env, result);
 	}
-	rc = vy_index_full_by_stmt(env, tx, index, found, result);
-	assert(rc != 0 || *result != NULL);
-	vy_read_iterator_cache_last(&itr);
 done:
 	tuple_unref(vykey);
 	vy_read_iterator_close(&itr);
@@ -3882,20 +3905,14 @@ vinyl_iterator_secondary_next(struct iterator *base, struct tuple **ret)
 		diag_set(ClientError, ER_READ_VIEW_ABORTED);
 		goto fail;
 	}
-
-	if (vy_read_iterator_next(&it->iterator, &tuple) != 0)
+	if (vy_read_iterator_next_full(&it->iterator, it->env, &tuple) != 0)
 		goto fail;
-	vy_read_iterator_cache_last(&it->iterator);
 	if (tuple == NULL) {
 		/* EOF. Close the iterator immediately. */
 		vinyl_iterator_close(it);
 		*ret = NULL;
 		return 0;
 	}
-	/* Get the full tuple from the primary index. */
-	if (vy_index_full_by_stmt(it->env, it->tx, it->index,
-				  tuple, &tuple) != 0)
-		goto fail;
 	*ret = tuple_bless(tuple);
 	tuple_unref(tuple);
 	if (*ret != NULL)
