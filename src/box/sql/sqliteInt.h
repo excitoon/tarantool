@@ -1313,7 +1313,6 @@ struct sqlite3 {
 	unsigned nProgressOps;	/* Number of opcodes for progress callback */
 #endif
 	Hash aFunc;		/* Hash table of connection functions */
-	Hash aCollSeq;		/* All collating sequences */
 	BusyHandler busyHandler;	/* Busy callback */
 	int busyTimeout;	/* Busy handler timeout, in msec */
 	int *pnBytesFreed;	/* If not NULL, increment this in DbFree() */
