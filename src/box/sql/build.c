@@ -2025,16 +2025,13 @@ sqlite3EndTable(Parse * pParse,	/* Parse context */
 	if (!p->pSelect)
 		tabOpts |= TF_WithoutRowid;
 
-	/* Special processing for WITHOUT ROWID Tables */
-	if (tabOpts & TF_WithoutRowid) {
-		if ((p->tabFlags & TF_HasPrimaryKey) == 0) {
-			sqlite3ErrorMsg(pParse,
-					"PRIMARY KEY missing on table %s",
-					p->zName);
-		} else {
-			p->tabFlags |= TF_WithoutRowid | TF_NoVisibleRowid;
-			convertToWithoutRowidTable(pParse, p);
-		}
+	if ((p->tabFlags & TF_HasPrimaryKey) == 0) {
+		sqlite3ErrorMsg(pParse,
+				"PRIMARY KEY missing on table %s",
+				p->zName);
+	} else {
+		p->tabFlags |= TF_WithoutRowid | TF_NoVisibleRowid;
+		convertToWithoutRowidTable(pParse, p);
 	}
 
 #ifndef SQLITE_OMIT_CHECK
