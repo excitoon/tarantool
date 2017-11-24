@@ -1452,11 +1452,11 @@ box.session.su('user')
 ...
 sq:alter{step = 2} -- error
 ---
-- error: Create, drop or alter access on sequence is denied for user 'user'
+- error: Alter access on sequence is denied for user 'user'
 ...
 sq:drop() -- error
 ---
-- error: Create, drop or alter access on sequence is denied for user 'user'
+- error: Delete access on sequence is denied for user 'user'
 ...
 box.session.su('admin')
 ---
@@ -1529,23 +1529,23 @@ s2 = box.schema.space.create('space2')
 ...
 _ = s2:create_index('pk', {sequence = 'seq1'}) -- error
 ---
-- error: Create, drop or alter access on sequence is denied for user 'user'
+- error: Create access on sequence is denied for user 'user'
 ...
 s1.index.pk:alter({sequence = 'seq1'}) -- error
 ---
-- error: Create, drop or alter access on space is denied for user 'user'
+- error: Alter access on space is denied for user 'user'
 ...
 box.space._space_sequence:replace{s1.id, sq1.id, false} -- error
 ---
-- error: Create, drop or alter access on space is denied for user 'user'
+- error: Alter access on space is denied for user 'user'
 ...
 box.space._space_sequence:replace{s1.id, sq2.id, false} -- error
 ---
-- error: Create, drop or alter access on space is denied for user 'user'
+- error: Alter access on space is denied for user 'user'
 ...
 box.space._space_sequence:replace{s2.id, sq1.id, false} -- error
 ---
-- error: Create, drop or alter access on sequence is denied for user 'user'
+- error: Create access on sequence is denied for user 'user'
 ...
 s2.index.pk:alter({sequence = 'seq2'}) -- ok
 ---

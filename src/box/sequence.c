@@ -247,7 +247,7 @@ access_check_sequence(struct sequence *seq)
 		struct user *user = user_find(cr->uid);
 		if (user != NULL)
 			diag_set_access_denied(schema_object_name(SC_SEQUENCE),
-								   seq->def->name,
+								   seq->def->name, "Write",
 								   ClientError, ER_SEQUENCE_ACCESS_DENIED,
 								   priv_name(access), user->def->name,
 								   seq->def->name);

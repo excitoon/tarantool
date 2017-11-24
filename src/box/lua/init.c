@@ -207,7 +207,8 @@ lbox_push_on_access_denied(struct lua_State *L, void *event)
 	struct access_denied_params *res = (struct access_denied_params *)event;
 	lua_pushstring(L, res->type);
 	lua_pushstring(L, res->name);
-	return 2;
+	lua_pushstring(L, res->op_type);
+	return 3;
 }
 
 static int

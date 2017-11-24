@@ -219,17 +219,18 @@ extern struct rlist on_access_denied;
 struct access_denied_params {
 	const char *type;
 	const char *name;
+	const char *op_type;
 };
 
 
-#define raise_access_denied(type, name, ...) do { 	\
-	struct access_denied_params res = {type, name};	\
+#define raise_access_denied(type, name, op_type, ...) do { 	\
+	struct access_denied_params res = {type, name, op_type};	\
 	trigger_run_xc(&on_access_denied, &res);				\
 	tnt_raise(__VA_ARGS__);							\
 } while(0)
 
-#define diag_set_access_denied(type, name, ...) do { 	\
-	struct access_denied_params res = {type, name};	\
+#define diag_set_access_denied(type, name, op_type, ...) do { 	\
+	struct access_denied_params res = {type, name, op_type};	\
 	trigger_run(&on_access_denied, &res);				\
 	diag_set(__VA_ARGS__);							\
 } while(0)

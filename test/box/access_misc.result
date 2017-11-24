@@ -209,7 +209,7 @@ uid = session.uid()
 --
 box.schema.user.drop('uniuser')
 ---
-- error: Create, drop or alter access on role is denied for user 'uniuser'
+- error: Revoke access on role is denied for user 'uniuser'
 ...
 --
 --Check create, call and drop function
@@ -287,15 +287,15 @@ session.su('someuser')
 --
 s:drop()
 ---
-- error: Create, drop or alter access on space is denied for user 'someuser'
+- error: Delete access on space is denied for user 'someuser'
 ...
 us:drop()
 ---
-- error: Create, drop or alter access on space is denied for user 'someuser'
+- error: Delete access on space is denied for user 'someuser'
 ...
 box.schema.func.drop('uniuser_func')
 ---
-- error: Create, drop or alter access on function is denied for user 'someuser'
+- error: Delete access on function is denied for user 'someuser'
 ...
 box.schema.user.drop('uniuser_testus')
 ---
@@ -343,7 +343,7 @@ testuser_uid = session.uid()
 ...
 box.space._user:delete(2)
 ---
-- error: Create, drop or alter access on user is denied for user 'testuser'
+- error: Delete access on user is denied for user 'testuser'
 ...
 box.space._user:select(1)
 ---

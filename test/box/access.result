@@ -470,7 +470,7 @@ msg = ""
 ...
 box.schema.user.drop('grantor')
 ---
-- error: Create, drop or alter access on role is denied for user 'grantor'
+- error: Revoke access on role is denied for user 'grantor'
 ...
 access_denied_count
 ---
@@ -960,7 +960,7 @@ access_denied_count = 0
 ...
 box.internal.collation.drop('test') -- fail
 ---
-- error: Create, drop or alter access on collation is denied for user 'test'
+- error: Delete access on collation is denied for user 'test'
 ...
 access_denied_count
 ---

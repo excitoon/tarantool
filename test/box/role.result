@@ -695,7 +695,7 @@ box.schema.user.grant('grantee', 'public')
 --
 box.schema.user.revoke('grantee', 'public')
 ---
-- error: Create, drop or alter access on role is denied for user 'john'
+- error: Revoke access on role is denied for user 'john'
 ...
 box.session.su('admin')
 ---

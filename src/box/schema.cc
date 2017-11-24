@@ -535,6 +535,8 @@ access_check_universe(uint8_t access)
 		 */
 		struct user *user = user_find_xc(credentials->uid);
 		raise_access_denied(schema_object_name(SC_UNIVERSE), "universe",
+							(access & PRIV_W) ? "Write":
+							(access & PRIV_R) ? "Read": "Execute",
 							ClientError, ER_ACCESS_DENIED,
 							priv_name(access), schema_object_name(SC_UNIVERSE),
 							user->def->name);

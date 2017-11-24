@@ -77,7 +77,9 @@ access_check_func(const char *name, uint32_t name_len, struct func **funcp)
 		if (user != NULL) {
 			const char *func_name = tt_cstr(name, name_len);
 			diag_set_access_denied(schema_object_name(SC_FUNCTION), func_name,
-			ClientError, ER_FUNCTION_ACCESS_DENIED, priv_name(access), user->def->name, func_name);
+								   "EXECUTE", ClientError,
+								   ER_FUNCTION_ACCESS_DENIED, priv_name(access),
+								   user->def->name, func_name);
 		}
 		return -1;
 	}

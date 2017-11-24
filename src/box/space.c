@@ -63,7 +63,10 @@ access_check_space(struct space *space, uint8_t access)
 		 */
 		struct user *user = user_find(cr->uid);
 		if (user != NULL) {
-			diag_set_access_denied(schema_object_name(SC_SPACE), space->def->name,
+			diag_set_access_denied(schema_object_name(SC_SPACE),
+								   space->def->name,
+								   (access & PRIV_W) ? "Write":
+								   (access & PRIV_R) ? "Read": "Execute",
 					 ClientError, ER_SPACE_ACCESS_DENIED,
 					 priv_name(access), user->def->name, space->def->name);
 		}
