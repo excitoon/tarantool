@@ -28,6 +28,7 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include <sio.h>
 #include "session.h"
 #include "fiber.h"
 #include "memory.h"
@@ -35,6 +36,7 @@
 #include "trigger.h"
 #include "random.h"
 #include "user.h"
+#include "box.h"
 
 const char *session_type_strs[] = {
 	"background",
@@ -213,4 +215,81 @@ session_free()
 {
 	if (session_registry)
 		mh_i64ptr_delete(session_registry);
+}
+
+const char *
+box_session_user()
+{
+	struct user *user = user_by_id(current_user()->uid);
+	if (user)
+		return user->def->name;
+	else
+		return NULL;
+}
+
+int
+box_session_peer(int sid, struct sockaddr *addr, uint32_t *addrlen)
+{
+	int fd;
+	struct session *session;
+	if (sid >= 0)
+		session = session_find((uint64_t) sid);
+	else
+		session = current_session();
+	if (session == NULL) {
+		diag_set(ClientError, ER_NO_SUCH_SESSION);
+		return -1;
+	}
+	fd = session->fd;
+	if (fd < 0) {
+		return 1;
+	}
+
+	*addrlen = sizeof(sockaddr_storage);
+	if (sio_getpeername(fd, addr, addrlen) < 0) {
+		diag_set(SystemError, "getpeername() failed");
+		return -1;
+	}
+	return 0;
+}
+
+bool
+box_session_exists(uint64_t sid)
+{
+	return session_find(sid) != NULL;
+}
+
+int
+box_session_fd(uint64_t sid)
+{
+	struct session *session = session_find(sid);
+	if (session == NULL) {
+		diag_set(ClientError, ER_NO_SUCH_SESSION);
+		return -1;
+	}
+	return session->fd;
+}
+
+int
+box_session_uid()
+{
+	return current_session()->credentials.uid;
+}
+
+int
+box_session_id()
+{
+	return current_session()->id;
+}
+
+uint64_t
+box_session_sync()
+{
+	return current_session()->sync;
+}
+
+const char *
+box_session_type()
+{
+	return session_type_strs[current_session()->type];
 }

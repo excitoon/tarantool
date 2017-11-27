@@ -72,7 +72,7 @@ lbox_session_create(struct lua_State *L)
 static int
 lbox_session_id(struct lua_State *L)
 {
-	lua_pushnumber(L, current_session()->id);
+	lua_pushnumber(L, box_session_id());
 	return 1;
 }
 
@@ -83,7 +83,7 @@ lbox_session_id(struct lua_State *L)
 static int
 lbox_session_type(struct lua_State *L)
 {
-	lua_pushstring(L, session_type_strs[current_session()->type]);
+	lua_pushstring(L, box_session_type());
 	return 1;
 }
 
@@ -95,7 +95,7 @@ lbox_session_type(struct lua_State *L)
 static int
 lbox_session_sync(struct lua_State *L)
 {
-	lua_pushnumber(L, current_session()->sync);
+	lua_pushnumber(L, box_session_sync());
 	return 1;
 }
 
@@ -111,7 +111,7 @@ lbox_session_uid(struct lua_State *L)
 	 * Sic: push session user, not the current user,
 	 * which may differ inside a setuid function.
 	 */
-	lua_pushnumber(L, current_session()->credentials.uid);
+	lua_pushnumber(L, box_session_uid());
 	return 1;
 }
 
@@ -123,11 +123,12 @@ lbox_session_uid(struct lua_State *L)
 static int
 lbox_session_user(struct lua_State *L)
 {
-	struct user *user = user_by_id(current_user()->uid);
-	if (user)
-		lua_pushstring(L, user->def->name);
-	else
+	const char *user_name = box_session_user();
+	if (user_name == NULL) {
 		lua_pushnil(L);
+	} else {
+		lua_pushstring(L, user_name);
+	}
 	return 1;
 }
 
@@ -155,7 +156,7 @@ lbox_session_su(struct lua_State *L)
 		luaT_error(L);
 	if (top == 1) {
 		credentials_init(&session->credentials, user->auth_token,
-				 user->def->uid);
+						 user->def->uid);
 		fiber_set_user(fiber(), &session->credentials);
 		return 0; /* su */
 	}
@@ -182,26 +183,23 @@ lbox_session_exists(struct lua_State *L)
 {
 	if (lua_gettop(L) != 1)
 		luaL_error(L, "session.exists(sid): bad arguments");
-
-	uint64_t sid = luaL_checkint64(L, -1);
-	lua_pushboolean(L, session_find(sid) != NULL);
+	lua_pushboolean(L, box_session_exists(luaL_checkint64(L, -1)));
 	return 1;
 }
 
 /**
- * Check whether or not a session exists.
+ * Returns session descriptor.
  */
 static int
 lbox_session_fd(struct lua_State *L)
 {
 	if (lua_gettop(L) != 1)
 		luaL_error(L, "session.fd(sid): bad arguments");
-
-	uint64_t sid = luaL_checkint64(L, -1);
-	struct session *session = session_find(sid);
-	if (session == NULL)
-		luaL_error(L, "session.fd(): session does not exist");
-	lua_pushinteger(L, session->fd);
+	int fd = box_session_fd(luaL_checkint64(L, -1));
+	if (fd < 0) {
+		luaL_error(L, diag_last_error(&fiber()->diag)->errmsg);
+	}
+	lua_pushinteger(L, fd);
 	return 1;
 }
 
@@ -215,26 +213,23 @@ lbox_session_peer(struct lua_State *L)
 	if (lua_gettop(L) > 1)
 		luaL_error(L, "session.peer(sid): bad arguments");
 
-	int fd;
-	struct session *session;
-	if (lua_gettop(L) == 1)
-		session = session_find(luaL_checkint(L, 1));
-	else
-		session = current_session();
-	if (session == NULL)
-		luaL_error(L, "session.peer(): session does not exist");
-	fd = session->fd;
-	if (fd < 0) {
+	struct sockaddr addr;
+	socklen_t addrlen = sizeof(struct sockaddr_storage);
+	int sid;
+	if (lua_gettop(L) == 1) {
+		sid = luaL_checkint(L, 1);
+	} else {
+		sid = -1;
+	}
+	int res = box_session_peer(sid, &addr, &addrlen);
+	if (res > 0) {
 		lua_pushnil(L); /* no associated peer */
 		return 1;
 	}
-
-	struct sockaddr_storage addr;
-	socklen_t addrlen = sizeof(addr);
-	if (sio_getpeername(fd, (struct sockaddr *)&addr, &addrlen) < 0)
-		luaL_error(L, "session.peer(): getpeername() failed");
-
-	lua_pushstring(L, sio_strfaddr((struct sockaddr *)&addr, addrlen));
+	if (res < 0) {
+		luaL_error(L, diag_last_error(&fiber()->diag)->errmsg);
+	}
+	lua_pushstring(L, sio_strfaddr(&addr, addrlen));
 	return 1;
 }
 

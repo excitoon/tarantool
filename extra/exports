@@ -194,6 +194,12 @@ box_latch_delete
 box_latch_lock
 box_latch_trylock
 box_latch_unlock
+box_session_user
+box_session_peer
+box_session_exists
+box_session_fd
+box_session_uid
+box_session_id
 clock_realtime
 clock_monotonic
 clock_process

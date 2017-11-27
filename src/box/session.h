@@ -58,6 +58,82 @@ enum session_type {
 };
 
 extern const char *session_type_strs[];
+/** \cond public */
+struct sockaddr;
+/**
+ * Get current user's name
+ * Note: effective user name may be different in
+ * a setuid function.
+ * @return Session user name or NULL in case of error
+ */
+API_EXPORT const char *
+box_session_user();
+
+/**
+ * Get peer sockaddr of requested session, if exists
+ * @param sid session id, pass -1 in order to get current session's peer
+ * @param pointer to socket address to be initialized
+ * @param pointer to size of sockaddrlen length
+ * @return 0, if success, -1 on error, 1 if no associated peer
+ */
+API_EXPORT int
+box_session_peer(int, struct sockaddr *, uint32_t *);
+
+/**
+ * Returns session file descriptor. Makes sense only if session has peer
+ * @param sid - session id
+ * @return session socket descriptor or -1 in case of error
+ */
+API_EXPORT int
+box_session_fd(uint64_t sid);
+
+/**
+ * Return a unique monotonic session
+ * identifier. The identifier can be used
+ * to check whether or not a session is alive.
+ * 0 means there is no session (e.g.
+ * a procedure is running in a detached
+ * fiber).
+ * @return id
+ */
+API_EXPORT int
+box_session_id();
+
+/**
+ * Return the id of currently executed request.
+ * Many requests share the same session so this is only
+ * valid at session start. 0 for non-iproto sessions.
+ * @return id of request
+ */
+API_EXPORT uint64_t
+box_session_sync();
+
+/**
+ * Session type: one of "binary", "console",
+ * "replication", "background" * @return id of request
+ * @return string literal
+ */
+API_EXPORT const char *
+box_session_type();
+
+/**
+ * Checks if sessions exists
+ * @param sid session id
+ * @return bool
+ */
+API_EXPORT bool
+box_session_exists(uint64_t sid);
+
+/**
+ * Session user id.
+ * Note: effective user id (current_user()->uid)
+ * may be different in a setuid function.
+ * @return current user id
+ */
+API_EXPORT int
+box_session_uid();
+
+/** \endcond public */
 
 /**
  * Abstraction of a single user session:
@@ -110,7 +186,7 @@ extern struct rlist session_on_auth;
  * @return session if any
  * @retval NULL if there is no active session
  */
-static inline struct session *
+inline struct session *
 fiber_get_session(struct fiber *fiber)
 {
 	return (struct session *) fiber_get_key(fiber, FIBER_KEY_SESSION);
@@ -183,7 +259,7 @@ current_session()
  * The same rationale for initializing the current
  * user on demand as in current_session() applies.
  */
-static inline struct credentials *
+inline struct credentials *
 current_user()
 {
 	struct credentials *u =
